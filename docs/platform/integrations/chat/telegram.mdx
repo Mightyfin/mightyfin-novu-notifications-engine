@@ -35,7 +35,7 @@ Every Telegram integration uses one bot. Create it with BotFather before adding 
     1234567890:AAFdT8_…
     ```
 
-    Copy the full message — Novu can extract the token automatically when you paste it into the dashboard.
+    Copy the full message - Novu can extract the token automatically when you paste it into the dashboard.
   </Step>
 </Steps>
 
@@ -76,7 +76,7 @@ Before Novu can deliver messages, each subscriber must connect their Telegram ch
 Novu gives you a link that opens your bot in Telegram. When the subscriber taps **Start**, their chat is linked to their Novu subscriber profile.
 
 <Note>
-  The connection link flow is available when Telegram is set up on an agent. If you only need one-way workflow notifications and already know a subscriber's Telegram chat ID, you can register it with the [channel endpoints API](/api-reference/channel-endpoints/create-a-channel-endpoint) instead.
+  The connection link flow works for any Telegram integration, whether or not it is attached to an agent. If you only need one-way workflow notifications and already know a subscriber's Telegram chat ID, you can register it with the [channel endpoints API](/api-reference/channel-endpoints/create-a-channel-endpoint) instead.
 </Note>
 
 #### From your backend
@@ -180,11 +180,11 @@ curl -L -X POST 'https://api.novu.co/v1/integrations/channel-endpoints/link' \
   </Tab>
 </Tabs>
 
-Open the returned `url` in a new tab or show it as a button in your UI. Generate a fresh link each time the subscriber starts the flow — links expire after a short time.
+Open the returned `url` in a new tab or show it as a button in your UI. Generate a fresh link each time the subscriber starts the flow - links expire after a short time.
 
 #### From your app with `@novu/react`
 
-For agent applications, use `TelegramConnectButton` inside `NovuProvider`. It opens Telegram for the subscriber and confirms when the chat is connected.
+Use `TelegramConnectButton` inside `NovuProvider`. It opens Telegram for the subscriber and confirms when the chat is connected. This works for any Telegram integration - the integration does not need to be attached to an agent.
 
 ```tsx
 import { NovuProvider, TelegramConnectButton } from '@novu/react';
@@ -361,7 +361,7 @@ Novu finds the subscriber's linked Telegram chat, renders the message, and sends
 
 ## Using Telegram with agents
 
-Telegram is a supported [agent provider](/agents/get-started/agents-and-providers). Connect your bot to an agent so users can message the bot and get replies in the same chat — without building Telegram integrations yourself.
+Telegram is a supported [agent provider](/agents/get-started/agents-and-providers). Connect your bot to an agent so users can message the bot and get replies in the same chat - without building Telegram integrations yourself.
 
 <Card title="Build agents on Telegram" icon="bot" href="/agents">
   Learn how Novu agents work, including managed and custom code agents.

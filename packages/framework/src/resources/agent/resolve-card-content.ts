@@ -2,8 +2,10 @@ import {
   Actions,
   Button,
   Card,
+  type CardElement,
   CardLink,
   CardText,
+  Chart,
   Divider,
   ExternalSelect,
   Field,
@@ -17,7 +19,6 @@ import {
   SelectOption,
   Table,
   TextInput,
-  type CardElement,
 } from 'chat';
 import { isCardElement } from './guards';
 
@@ -28,12 +29,13 @@ const CHAT_JSX_ELEMENT = Symbol.for('chat.jsx.element');
  * Invoking them as React-style components would corrupt the tree, so they must
  * be left for `toCardElement`.
  */
-const CHAT_JSX_PRIMITIVES = new Set<Function>([
+const CHAT_JSX_PRIMITIVES = new Set<unknown>([
   Actions,
   Button,
   Card,
   CardLink,
   CardText,
+  Chart,
   Divider,
   ExternalSelect,
   Field,
@@ -56,12 +58,22 @@ type ChatJsxElement = {
   children?: unknown;
 };
 
+/** An element already built by a chat factory, e.g. `Chart({ ... })` → `{ type: 'chart', ... }`. */
+type BuiltCardElement = { type: unknown };
+
+/**
+ * The card tree after user components are expanded. Mirrors what chat's
+ * `processChildren` keeps; anything else (booleans, functions, objects without
+ * `type`) is dropped by chat, so it is normalised to `null` here.
+ */
+type CardNode = ChatJsxElement | BuiltCardElement | string | number | null | CardNode[];
+
+function isBuiltCardElement(value: unknown): value is BuiltCardElement {
+  return typeof value === 'object' && value !== null && 'type' in value;
+}
+
 function isChatJsxElement(value: unknown): value is ChatJsxElement {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    (value as { $$typeof?: unknown }).$$typeof === CHAT_JSX_ELEMENT
-  );
+  return typeof value === 'object' && value !== null && (value as { $$typeof?: unknown }).$$typeof === CHAT_JSX_ELEMENT;
 }
 
 /**
@@ -88,13 +100,13 @@ export async function resolveCardContent(content: unknown): Promise<CardElement 
   return null;
 }
 
-function resolveUserComponents(value: unknown): unknown {
+function resolveUserComponents(value: unknown): CardNode {
   if (Array.isArray(value)) {
     return value.map((child) => resolveUserComponents(child));
   }
 
   if (!isChatJsxElement(value)) {
-    return value;
+    return toCardLeaf(value);
   }
 
   if (typeof value.type === 'function' && !CHAT_JSX_PRIMITIVES.has(value.type)) {
@@ -111,4 +123,12 @@ function resolveUserComponents(value: unknown): unknown {
     ...value,
     children: resolveUserComponents(value.children),
   };
+}
+
+function toCardLeaf(value: unknown): CardNode {
+  if (typeof value === 'string' || typeof value === 'number' || isBuiltCardElement(value)) {
+    return value;
+  }
+
+  return null;
 }

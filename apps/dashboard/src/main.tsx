@@ -40,12 +40,15 @@ import { ConnectSubscriberProvider } from './components/connect/connect-subscrib
 import { CreateIntegrationSidebar } from './components/integrations/components/create-integration-sidebar';
 import { UpdateIntegrationSidebar } from './components/integrations/components/update-integration-sidebar';
 import { ChannelPreferences } from './components/workflow-editor/channel-preferences';
+import { WorkflowAgentAssignment } from './components/workflow-editor/workflow-agent-assignment';
 import { EE_AUTH_PROVIDER, IS_CLOUD, IS_SELF_HOSTED, IS_SELF_HOSTED_CE } from './config';
 import { FeatureFlagsProvider } from './context/feature-flags-provider';
 import { AgentDetailsPage } from './pages/agent-details';
 import { AgentSlackSetupPage } from './pages/agent-slack-setup-page';
 import { AgentTelegramMobileSetupPage } from './pages/agent-telegram-mobile-setup-page';
+import { AgentWhatsAppSignupPage } from './pages/agent-whatsapp-signup-page';
 import { AgentsPage } from './pages/agents';
+import { AgentsPersonalizePage } from './pages/agents-personalize-page';
 import { AgentsSetupPage } from './pages/agents-setup-page';
 import { CliAuthPage } from './pages/cli-auth';
 import { ConnectClaimPage } from './pages/connect-claim';
@@ -126,6 +129,13 @@ const router = createBrowserRouter([
         element: <AgentTelegramMobileSetupPage />,
       },
       {
+        // Public, unauthenticated WhatsApp Embedded Signup page opened by
+        // `npx novu connect`. Trust comes from the opaque token in the URL, so
+        // it is mounted outside AuthRoute (keyless CLI users have no session).
+        path: ROUTES.AGENT_WHATSAPP_SIGNUP,
+        element: <AgentWhatsAppSignupPage />,
+      },
+      {
         // Public, unauthenticated mobile setup page for the Telegram integration
         // store create flow. Creates a new integration server-side on submit.
         path: ROUTES.INTEGRATION_TELEGRAM_MOBILE_SETUP,
@@ -180,6 +190,10 @@ const router = createBrowserRouter([
           {
             path: ROUTES.USECASE_SELECT,
             element: <UsecaseSelectPage />,
+          },
+          {
+            path: ROUTES.AGENTS_PERSONALIZE,
+            element: <AgentsPersonalizePage />,
           },
           {
             path: ROUTES.AGENTS_SETUP,
@@ -409,37 +423,32 @@ const router = createBrowserRouter([
                 ],
               },
               {
-                element: <ConnectSubscriberProvider />,
-                children: [
-                  {
-                    path: ROUTES.AGENTS,
-                    element: <AgentsPage />,
-                  },
-                  {
-                    path: ROUTES.AGENT_DETAILS_INTEGRATIONS_DETAIL,
-                    element: (
-                      <ProtectedRoute permission={PermissionsEnum.AGENT_READ}>
-                        <AgentDetailsPage />
-                      </ProtectedRoute>
-                    ),
-                  },
-                  {
-                    path: ROUTES.AGENT_DETAILS_TAB,
-                    element: (
-                      <ProtectedRoute permission={PermissionsEnum.AGENT_READ}>
-                        <AgentDetailsPage />
-                      </ProtectedRoute>
-                    ),
-                  },
-                  {
-                    path: ROUTES.AGENT_DETAILS,
-                    element: (
-                      <ProtectedRoute permission={PermissionsEnum.AGENT_READ}>
-                        <AgentDetailsPage />
-                      </ProtectedRoute>
-                    ),
-                  },
-                ],
+                path: ROUTES.AGENTS,
+                element: <AgentsPage />,
+              },
+              {
+                path: ROUTES.AGENT_DETAILS_INTEGRATIONS_DETAIL,
+                element: (
+                  <ProtectedRoute permission={PermissionsEnum.AGENT_READ}>
+                    <AgentDetailsPage />
+                  </ProtectedRoute>
+                ),
+              },
+              {
+                path: ROUTES.AGENT_DETAILS_TAB,
+                element: (
+                  <ProtectedRoute permission={PermissionsEnum.AGENT_READ}>
+                    <AgentDetailsPage />
+                  </ProtectedRoute>
+                ),
+              },
+              {
+                path: ROUTES.AGENT_DETAILS,
+                element: (
+                  <ProtectedRoute permission={PermissionsEnum.AGENT_READ}>
+                    <AgentDetailsPage />
+                  </ProtectedRoute>
+                ),
               },
               {
                 path: ROUTES.DOMAINS,
@@ -557,6 +566,10 @@ const router = createBrowserRouter([
                     path: ROUTES.EDIT_WORKFLOW_PREFERENCES,
                   },
                   {
+                    element: <WorkflowAgentAssignment />,
+                    path: ROUTES.EDIT_WORKFLOW_AGENT,
+                  },
+                  {
                     path: ROUTES.LOCAL_TRIGGER_WORKFLOW,
                     element: (
                       <ProtectedRoute permission={PermissionsEnum.EVENT_WRITE} isDrawerRoute>
@@ -594,6 +607,10 @@ const router = createBrowserRouter([
                   {
                     element: <ChannelPreferences />,
                     path: ROUTES.EDIT_WORKFLOW_PREFERENCES,
+                  },
+                  {
+                    element: <WorkflowAgentAssignment />,
+                    path: ROUTES.EDIT_WORKFLOW_AGENT,
                   },
                   {
                     path: ROUTES.TRIGGER_WORKFLOW,

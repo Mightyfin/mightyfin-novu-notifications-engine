@@ -1,12 +1,13 @@
 import { TelegramConnectButtonProps } from '@novu/js/ui';
-import { useCallback } from 'react';
-import { useNovuUI } from '../../context/NovuUIContext';
+import { useMemo } from 'react';
 import { Mounter } from '../Mounter';
 
 export type DefaultTelegramConnectButtonProps = Pick<
   TelegramConnectButtonProps,
   | 'integrationIdentifier'
   | 'subscriberId'
+  | 'context'
+  | 'contextHash'
   | 'onConnectSuccess'
   | 'onConnectError'
   | 'onDisconnectSuccess'
@@ -19,6 +20,8 @@ export const DefaultTelegramConnectButton = (props: DefaultTelegramConnectButton
   const {
     integrationIdentifier,
     subscriberId,
+    context,
+    contextHash,
     onConnectSuccess,
     onConnectError,
     onDisconnectSuccess,
@@ -26,29 +29,25 @@ export const DefaultTelegramConnectButton = (props: DefaultTelegramConnectButton
     connectLabel,
     connectedLabel,
   } = props;
-  const { novuUI } = useNovuUI();
 
-  const mount = useCallback(
-    (element: HTMLElement) => {
-      return novuUI.mountComponent({
-        name: 'TelegramConnectButton',
-        props: {
-          integrationIdentifier,
-          subscriberId,
-          onConnectSuccess,
-          onConnectError,
-          onDisconnectSuccess,
-          onDisconnectError,
-          connectLabel,
-          connectedLabel,
-        },
-        element,
-      });
-    },
-    [
-      novuUI,
+  const mountProps = useMemo(
+    () => ({
       integrationIdentifier,
       subscriberId,
+      context,
+      contextHash,
+      onConnectSuccess,
+      onConnectError,
+      onDisconnectSuccess,
+      onDisconnectError,
+      connectLabel,
+      connectedLabel,
+    }),
+    [
+      integrationIdentifier,
+      subscriberId,
+      context,
+      contextHash,
       onConnectSuccess,
       onConnectError,
       onDisconnectSuccess,
@@ -58,5 +57,5 @@ export const DefaultTelegramConnectButton = (props: DefaultTelegramConnectButton
     ]
   );
 
-  return <Mounter mount={mount} />;
+  return <Mounter name="TelegramConnectButton" props={mountProps} />;
 };

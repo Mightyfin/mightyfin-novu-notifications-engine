@@ -143,6 +143,7 @@ interface AgentToolsetConfigEntry {
 
 interface AgentToolsetPayloadEntry {
   type: string;
+  name?: string;
   configs?: AgentToolsetConfigEntry[];
   mcp_server_name?: string;
   default_config?: {
@@ -205,7 +206,10 @@ describe('AnthropicAgentRuntimeProvider.uploadSkill', () => {
       // server-side source filter is broken (truncates and lies with
       // `has_more: false`); see provider for the full explanation.
       expect(mockClient.beta.skills.list.mock.calls).to.have.lengthOf(1);
-      expect(mockClient.beta.skills.list.mock.calls[0][0]).to.deep.equal({ limit: 100 });
+      expect(mockClient.beta.skills.list.mock.calls[0][0]).to.deep.equal({
+        limit: 100,
+        betas: ['skills-2025-10-02'],
+      });
       expect(mockClient.beta.skills.create.mock.calls).to.have.lengthOf(1);
       expect(mockClient.post.mock.calls).to.have.lengthOf(0);
 
@@ -242,7 +246,10 @@ describe('AnthropicAgentRuntimeProvider.uploadSkill', () => {
       // `github-repo` re-uploads converge on the same version-append branch.
       expect(mockClient.beta.skills.create.mock.calls).to.have.lengthOf(0);
       expect(mockClient.beta.skills.list.mock.calls).to.have.lengthOf(1);
-      expect(mockClient.beta.skills.list.mock.calls[0][0]).to.deep.equal({ limit: 100 });
+      expect(mockClient.beta.skills.list.mock.calls[0][0]).to.deep.equal({
+        limit: 100,
+        betas: ['skills-2025-10-02'],
+      });
 
       expect(mockClient.post.mock.calls).to.have.lengthOf(1);
       const [pathArg, optsArg] = mockClient.post.mock.calls[0];
@@ -518,12 +525,12 @@ describe('AnthropicAgentRuntimeProvider.updateConfig', () => {
 
     const [, updatePayload] = update.mock.calls[0];
     const toolset = getToolsetPayload(updatePayload as { tools?: AgentToolsetPayloadEntry[] });
-    const platformTool = (updatePayload as { tools?: AgentToolsetPayloadEntry[] }).tools?.find(
+    const platformTools = (updatePayload as { tools?: AgentToolsetPayloadEntry[] }).tools?.filter(
       (t) => t.type === 'custom'
     );
 
     expect(toolset?.configs?.every((c) => c.enabled === false)).to.equal(true);
-    expect(platformTool).to.deep.include({ type: 'custom', name: 'novu_tools' });
+    expect(platformTools?.map((t) => t.name)).to.deep.equal(['novu_tool_catalog', 'novu_resolve']);
   });
 
   it('preserves currently-enabled tools (by externalId) when only mcpServers is patched', async () => {
@@ -542,6 +549,7 @@ describe('AnthropicAgentRuntimeProvider.updateConfig', () => {
         },
       ],
       mcp_servers: [],
+      skills: [],
     });
 
     const update = jest.fn().mockResolvedValue({
@@ -578,5 +586,76 @@ describe('AnthropicAgentRuntimeProvider.updateConfig', () => {
     );
     expect(mcpToolset?.mcp_server_name).to.equal('Slack');
     expect(mcpToolset?.default_config?.permission_policy).to.deep.equal({ type: 'always_ask' });
+  });
+
+  it('force-enables read when attaching skills without rebuilding tools from a tools patch', async () => {
+    const provider = createAnthropicProvider(AgentRuntimeProviderIdEnum.Anthropic, { apiKey: 'test-key' });
+
+    const retrieve = jest.fn().mockResolvedValue({
+      version: 1,
+      tools: [
+        {
+          type: 'agent_toolset_20260401',
+          configs: [
+            { name: 'web_search', enabled: true },
+            { name: 'read', enabled: false },
+          ],
+        },
+      ],
+      mcp_servers: [],
+      skills: [],
+    });
+
+    const update = jest.fn().mockResolvedValue({
+      model: 'claude-sonnet-4-5',
+      system: '',
+      tools: [],
+      mcp_servers: [],
+      skills: [{ type: 'anthropic', skill_id: 'pdf', version: null }],
+    });
+
+    installUpdateConfigMockClient(provider, { retrieve, update });
+
+    await provider.updateConfig('ext-agent-id', {
+      skills: [{ type: 'anthropic', skillId: 'pdf', version: null }],
+    });
+
+    const [, updatePayload] = update.mock.calls[0];
+    const toolset = getToolsetPayload(updatePayload as { tools?: AgentToolsetPayloadEntry[] });
+    const enabledNames = toolset?.configs?.filter((c) => c.enabled).map((c) => c.name) ?? [];
+
+    expect(enabledNames).to.include.members(['web_search', 'read']);
+    expect(updatePayload.skills).to.deep.equal([{ type: 'anthropic', skill_id: 'pdf' }]);
+  });
+
+  it('force-enables read when tools are patched while skills remain attached', async () => {
+    const provider = createAnthropicProvider(AgentRuntimeProviderIdEnum.Anthropic, { apiKey: 'test-key' });
+
+    const retrieve = jest.fn().mockResolvedValue({
+      version: 1,
+      tools: [],
+      mcp_servers: [],
+      skills: [{ type: 'anthropic', skill_id: 'pdf', version: null }],
+    });
+
+    const update = jest.fn().mockResolvedValue({
+      model: 'claude-sonnet-4-5',
+      system: '',
+      tools: [],
+      mcp_servers: [],
+      skills: [{ type: 'anthropic', skill_id: 'pdf', version: null }],
+    });
+
+    installUpdateConfigMockClient(provider, { retrieve, update });
+
+    await provider.updateConfig('ext-agent-id', {
+      tools: [{ externalId: 'web_search', name: 'Web Search', type: 'builtin' }],
+    });
+
+    const [, updatePayload] = update.mock.calls[0];
+    const toolset = getToolsetPayload(updatePayload as { tools?: AgentToolsetPayloadEntry[] });
+    const enabledNames = toolset?.configs?.filter((c) => c.enabled).map((c) => c.name) ?? [];
+
+    expect(enabledNames).to.include.members(['web_search', 'read']);
   });
 });

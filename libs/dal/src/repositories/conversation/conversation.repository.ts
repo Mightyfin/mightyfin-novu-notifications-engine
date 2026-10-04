@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { DirectionEnum } from '@novu/shared';
+import { AGENT_AUTH_METADATA_KEYS, DirectionEnum } from '@novu/shared';
 import { type ClientSession, FilterQuery, Types } from 'mongoose';
 import { EnforceEnvOrOrgIds } from '../../types';
 import { SortOrder } from '../../types/sort-order';
@@ -68,6 +68,24 @@ export class ConversationRepository extends BaseRepositoryV2<
     );
   }
 
+  /**
+   * How many other agents already have a conversation on this platform thread.
+   * Used by Smart reply-policy so a second Novu agent counts like a second speaker.
+   */
+  async countOtherAgentsOnPlatformThread(
+    environmentId: string,
+    organizationId: string,
+    platformThreadId: string,
+    agentId: string
+  ): Promise<number> {
+    return this.count({
+      _environmentId: environmentId,
+      _organizationId: organizationId,
+      _agentId: { $ne: agentId },
+      'channels.platformThreadId': platformThreadId,
+    });
+  }
+
   async findByAgentIntegrationParticipant(
     environmentId: string,
     organizationId: string,
@@ -75,7 +93,13 @@ export class ConversationRepository extends BaseRepositoryV2<
     integrationId: string,
     participantId: string,
     participantType: ConversationParticipantTypeEnum = ConversationParticipantTypeEnum.PLATFORM_USER,
-    title?: string
+    title?: string,
+    /**
+     * When set, only match conversations whose channel belongs to this platform workspace
+     * (e.g. Slack `team_id`). Required for multi-workspace welcome dedup so a prior welcome
+     * in workspace A does not suppress a welcome in workspace B for the same participant key.
+     */
+    workspaceId?: string
   ): Promise<ConversationEntity | null> {
     return this.findOne(
       {
@@ -85,6 +109,7 @@ export class ConversationRepository extends BaseRepositoryV2<
         channels: {
           $elemMatch: {
             _integrationId: new Types.ObjectId(integrationId),
+            ...(workspaceId ? { 'workspace.id': workspaceId } : {}),
           },
         },
         participants: { $elemMatch: { id: participantId, type: participantType } },
@@ -181,7 +206,8 @@ export class ConversationRepository extends BaseRepositoryV2<
     environmentId: string,
     organizationId: string,
     id: string,
-    messagePreview: string
+    messagePreview: string,
+    session?: ClientSession | null
   ): Promise<void> {
     await this.update(
       { _id: id, _environmentId: environmentId, _organizationId: organizationId },
@@ -191,7 +217,26 @@ export class ConversationRepository extends BaseRepositoryV2<
           lastMessagePreview: messagePreview.slice(0, 200),
         },
         $inc: { messageCount: 1 },
-      }
+      },
+      session ? { session } : {}
+    );
+  }
+
+  async incrementMessageCount(
+    environmentId: string,
+    organizationId: string,
+    id: string,
+    count: number,
+    session?: ClientSession | null
+  ): Promise<void> {
+    if (count === 0) {
+      return;
+    }
+
+    await this.update(
+      { _id: id, _environmentId: environmentId, _organizationId: organizationId },
+      { $inc: { messageCount: count } },
+      session ? { session } : {}
     );
   }
 
@@ -200,7 +245,13 @@ export class ConversationRepository extends BaseRepositoryV2<
    * Used for in-place message edits (replyHandle.edit) — the message count stays the same,
    * but the conversation's timeline and preview should reflect the latest content.
    */
-  async touchPreview(environmentId: string, organizationId: string, id: string, messagePreview: string): Promise<void> {
+  async touchPreview(
+    environmentId: string,
+    organizationId: string,
+    id: string,
+    messagePreview: string,
+    session?: ClientSession | null
+  ): Promise<void> {
     await this.update(
       { _id: id, _environmentId: environmentId, _organizationId: organizationId },
       {
@@ -208,7 +259,8 @@ export class ConversationRepository extends BaseRepositoryV2<
           lastActivityAt: new Date().toISOString(),
           lastMessagePreview: messagePreview.slice(0, 200),
         },
-      }
+      },
+      session ? { session } : {}
     );
   }
 
@@ -268,6 +320,18 @@ export class ConversationRepository extends BaseRepositoryV2<
     );
 
     return result.matched > 0;
+  }
+
+  async setNotificationId(
+    environmentId: string,
+    organizationId: string,
+    conversationId: string,
+    notificationId: string
+  ): Promise<void> {
+    await this.update(
+      { _id: conversationId, _environmentId: environmentId, _organizationId: organizationId },
+      { $set: { _notificationId: notificationId } }
+    );
   }
 
   async clearExternalSessionId(environmentId: string, conversationId: string): Promise<void> {
@@ -334,6 +398,37 @@ export class ConversationRepository extends BaseRepositoryV2<
         participants: { $elemMatch: { id: participantId, type: participantType } },
         pendingManagedAgentSetup: { $exists: true },
       },
+      '*'
+    );
+  }
+
+  /**
+   * Finds conversations where a platform user was shown the auth CTA card and has
+   * not yet been confirmed as linked — i.e. `metadata` still carries the auth-card
+   * tracking key written by the framework auth gate. Scoped to the integration and
+   * the platform participant so a link event only touches that user's own threads.
+   * Powers the real-time "account linked" card update on `CreateChannelEndpoint`.
+   */
+  async findPendingAuthCards(params: {
+    environmentId: string;
+    organizationId: string;
+    integrationId: string;
+    participantId: string;
+  }): Promise<ConversationEntity[]> {
+    return this.find(
+      {
+        _environmentId: params.environmentId,
+        _organizationId: params.organizationId,
+        channels: {
+          $elemMatch: {
+            _integrationId: new Types.ObjectId(params.integrationId),
+          },
+        },
+        participants: {
+          $elemMatch: { id: params.participantId, type: ConversationParticipantTypeEnum.PLATFORM_USER },
+        },
+        [`metadata.${AGENT_AUTH_METADATA_KEYS.authCardMessageId}`]: { $exists: true },
+      } as FilterQuery<ConversationDBModel> & EnforceEnvOrOrgIds,
       '*'
     );
   }
@@ -435,6 +530,55 @@ export class ConversationRepository extends BaseRepositoryV2<
     );
   }
 
+  /**
+   * Atomically advances the conversation event high-watermark and returns the
+   * allocated sequence number (1-based).
+   */
+  async allocateEventSequence(
+    environmentId: string,
+    organizationId: string,
+    conversationId: string,
+    minimum = 0
+  ): Promise<number> {
+    const [sequence] = await this.allocateEventSequenceRange(environmentId, organizationId, conversationId, 1, minimum);
+
+    return sequence;
+  }
+
+  async allocateEventSequenceRange(
+    environmentId: string,
+    organizationId: string,
+    conversationId: string,
+    count: number,
+    minimum = 0
+  ): Promise<number[]> {
+    if (count <= 0) {
+      return [];
+    }
+
+    const filter = {
+      _id: conversationId,
+      _environmentId: environmentId,
+      _organizationId: organizationId,
+    };
+
+    if (minimum > 0) {
+      await this.update(
+        {
+          ...filter,
+          $or: [{ eventSequence: { $lt: minimum } }, { eventSequence: { $exists: false } }],
+        },
+        { $set: { eventSequence: minimum } }
+      );
+    }
+
+    const updated = await this.findOneAndUpdate(filter, { $inc: { eventSequence: count } }, { new: true });
+    const lastSequence = updated?.eventSequence ?? count;
+    const firstSequence = lastSequence - count + 1;
+
+    return Array.from({ length: count }, (_, index) => firstSequence + index);
+  }
+
   async incrementTokenUsage(
     environmentId: string,
     organizationId: string,
@@ -501,6 +645,7 @@ export class ConversationRepository extends BaseRepositoryV2<
     identifier,
     provider,
     createdAfter,
+    contextKeys,
   }: {
     organizationId: string;
     environmentId: string;
@@ -516,6 +661,7 @@ export class ConversationRepository extends BaseRepositoryV2<
     identifier?: string;
     provider?: string[];
     createdAfter?: string;
+    contextKeys?: string[];
   }): Promise<{
     data: ConversationEntity[];
     next: string | null;
@@ -578,6 +724,11 @@ export class ConversationRepository extends BaseRepositoryV2<
 
     if (createdAfter) {
       query.createdAt = { $gte: new Date(createdAfter) };
+    }
+
+    if (contextKeys !== undefined) {
+      const contextQuery = this.buildContextExactMatchQuery(contextKeys);
+      query.$and = [...(query.$and ?? []), contextQuery];
     }
 
     return this.findWithCursorBasedPagination({

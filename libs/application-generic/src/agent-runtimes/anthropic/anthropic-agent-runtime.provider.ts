@@ -1,3 +1,8 @@
+/**
+ * biome-ignore-all lint/suspicious/noExplicitAny: Managed Agents beta payloads are accessed untyped until the SDK types are adopted (NV-8923)
+ * biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: needs to be fixed
+ * biome-ignore-all lint/style/noNonNullAssertion: needs to be fixed
+ */
 import { APIConnectionError, APIConnectionTimeoutError, APIError, toFile } from '@anthropic-ai/sdk';
 import type { AgentRuntimeConfigDto } from '@novu/shared';
 import {
@@ -5,7 +10,7 @@ import {
   AgentRuntimeCapabilities,
   AgentRuntimeProviderIdEnum,
   isAnthropicAwsProvider,
-  NOVU_TOOLS_SCHEMA,
+  isNovuInternalToolName,
 } from '@novu/shared';
 import { BaseAgentRuntimeProvider } from '../base-agent-runtime.provider';
 import {
@@ -71,6 +76,14 @@ const DEFAULT_MODEL = 'claude-sonnet-4-6';
 const RETRY_JITTER_MS = 500;
 /** Anthropic enforces a 64-char cap on `display_title` for `beta.skills.create`. */
 const MAX_DISPLAY_TITLE_LENGTH = 64;
+
+/**
+ * Pins the Skills API to the beta shape (`display_title`, `latest_version`).
+ * Since @anthropic-ai/sdk@0.122.0 `beta.skills.*` no longer sends this header
+ * by default and the API answers with the GA shape (`display_name`,
+ * `latest_version_id`) instead.
+ */
+const SKILLS_BETA = 'skills-2025-10-02';
 
 export class AnthropicAgentRuntimeProvider extends BaseAgentRuntimeProvider {
   readonly providerId: AgentRuntimeProviderIdEnum;
@@ -180,7 +193,9 @@ export class AnthropicAgentRuntimeProvider extends BaseAgentRuntimeProvider {
     // Not retried: agent creation is not idempotent and a retry after a
     // dropped response would create a duplicate billable agent upstream.
     try {
-      const toolsPayload = buildToolsPayload(input.tools, input.mcpServers);
+      const skills = input.skills ?? [];
+      const hasSkills = skills.length > 0;
+      const toolsPayload = buildToolsPayload(input.tools, input.mcpServers, hasSkills);
       const agent = await (client as any).beta.agents.create({
         name: input.name,
         model: input.model ?? DEFAULT_MODEL,
@@ -189,7 +204,7 @@ export class AnthropicAgentRuntimeProvider extends BaseAgentRuntimeProvider {
           ? { mcp_servers: input.mcpServers.map((s) => ({ name: s.name, type: 'url', url: s.url })) }
           : {}),
         ...(toolsPayload.length > 0 ? { tools: toolsPayload } : {}),
-        ...(input.skills && input.skills.length > 0 ? { skills: input.skills.map(toSkillParam) } : {}),
+        ...(hasSkills ? { skills: skills.map(toSkillParam) } : {}),
       });
 
       return { externalAgentId: agent.id as string };
@@ -281,7 +296,17 @@ export class AnthropicAgentRuntimeProvider extends BaseAgentRuntimeProvider {
         if (patch.mcpServers !== undefined) {
           updatePayload.mcp_servers = patch.mcpServers.map((s) => ({ name: s.name, type: 'url', url: s.url }));
         }
-        if (patch.tools !== undefined || patch.mcpServers !== undefined) {
+
+        // Anthropic rejects skills without a usable `read` tool. Compute the
+        // effective skill set after this patch so we can force-enable `read`
+        // even on a skills-only update that wouldn't otherwise touch tools.
+        const currentSkills = ((currentAgent.skills as any[]) ?? []).map(mapSkill);
+        const effectiveSkills = patch.skills !== undefined ? patch.skills : currentSkills;
+        const hasSkills = effectiveSkills.length > 0;
+        const shouldRebuildTools =
+          patch.tools !== undefined || patch.mcpServers !== undefined || (patch.skills !== undefined && hasSkills);
+
+        if (shouldRebuildTools) {
           const currentTools = ((currentAgent.tools as any[]) ?? []).flatMap(mapToolset);
           const currentMcpServers = ((currentAgent.mcp_servers as any[]) ?? []).map(mapMcpServer);
           // Use externalId (the provider tool `type`, e.g. "bash"), not the display `name`
@@ -293,7 +318,7 @@ export class AnthropicAgentRuntimeProvider extends BaseAgentRuntimeProvider {
             patch.mcpServers !== undefined
               ? patch.mcpServers.map((s) => ({ name: s.name, url: s.url }))
               : currentMcpServers.map((s) => ({ name: s.name, url: s.url }));
-          const toolsPayload = buildToolsPayload(toolTypes, mcpServers);
+          const toolsPayload = buildToolsPayload(toolTypes, mcpServers, hasSkills);
 
           if (toolsPayload.length > 0) updatePayload.tools = toolsPayload;
         }
@@ -323,22 +348,24 @@ export class AnthropicAgentRuntimeProvider extends BaseAgentRuntimeProvider {
       try {
         // Read the agent's current user-selected tools/MCP and re-emit them through
         // buildToolsPayload, which always appends Novu-owned platform tools (e.g.
-        // novu_tools). Nothing the user chose changes — this only backfills the overlay.
+        // novu_tool_catalog). Nothing the user chose changes — this only backfills the overlay.
         const currentAgent = await (client as any).beta.agents.retrieve(externalAgentId);
         const rawTools = (currentAgent.tools as any[]) ?? [];
         const currentTools = rawTools.flatMap(mapToolset);
         const currentMcpServers = ((currentAgent.mcp_servers as any[]) ?? []).map(mapMcpServer);
+        const hasSkills = ((currentAgent.skills as any[]) ?? []).length > 0;
 
         // Preserve any provider-side custom tools we don't own (e.g. on an adopted agent).
-        // buildToolsPayload re-emits Novu's own novu_tools, so drop it here to avoid a duplicate.
+        // buildToolsPayload re-emits Novu-owned platform tools, so drop those here to avoid duplicates.
         const foreignCustomTools = rawTools.filter(
-          (tool) => tool?.type === 'custom' && tool?.name !== NOVU_TOOLS_SCHEMA.name
+          (tool) => tool?.type === 'custom' && !isNovuInternalToolName(tool?.name)
         );
 
         const toolsPayload = [
           ...buildToolsPayload(
             currentTools.map((t) => t.externalId),
-            currentMcpServers.map((s) => ({ name: s.name, url: s.url }))
+            currentMcpServers.map((s) => ({ name: s.name, url: s.url })),
+            hasSkills
           ),
           ...foreignCustomTools,
         ];
@@ -694,6 +721,7 @@ export class AnthropicAgentRuntimeProvider extends BaseAgentRuntimeProvider {
       const skill = await (client as any).beta.skills.create({
         ...(displayTitle ? { display_title: displayTitle } : {}),
         files,
+        betas: [SKILLS_BETA],
       });
 
       return {
@@ -763,7 +791,7 @@ export class AnthropicAgentRuntimeProvider extends BaseAgentRuntimeProvider {
     displayTitle: string
   ): Promise<string | null> {
     try {
-      const iterator = (client as any).beta.skills.list({ limit: 100 }) as AsyncIterable<{
+      const iterator = (client as any).beta.skills.list({ limit: 100, betas: [SKILLS_BETA] }) as AsyncIterable<{
         id: string;
         display_title: string | null;
         source?: string;
@@ -785,18 +813,13 @@ export class AnthropicAgentRuntimeProvider extends BaseAgentRuntimeProvider {
 
   /**
    * Append a new version to an existing skill by calling the underlying HTTP
-   * endpoint directly. We can't use `client.beta.skills.versions.create` here
-   * because @anthropic-ai/sdk@0.95.x defaults `stripFilenames` to `true` for
-   * that endpoint, which strips directory components from the multipart form
-   * `filename` parts. The Anthropic API then can't locate `SKILL.md` inside
-   * a top-level folder and rejects the bundle.
+   * endpoint directly. The multipart `filename` parts must keep the
+   * `<directoryName>/` prefix, otherwise the Anthropic API can't locate
+   * `SKILL.md` inside a top-level folder and rejects the bundle.
    *
-   *   skills.create        → multipartFormRequestOptions(..., false) → sends "my-skill/SKILL.md"
-   *   skills.versions.create → multipartFormRequestOptions(...)      → sends "SKILL.md" (broken)
-   *
-   * Building the FormData ourselves and passing it to `client.post` bypasses
-   * the SDK's stripping logic entirely (BaseAnthropic#buildBody hands any
-   * FormData body straight through to fetch).
+   * Older SDKs (<0.98.1) stripped that prefix in `skills.versions.create`;
+   * current versions keep it, so this raw POST can be replaced by the SDK
+   * call (NV-8922).
    */
   private async createSkillVersion(
     client: AnthropicCompatibleClient,
@@ -812,7 +835,7 @@ export class AnthropicAgentRuntimeProvider extends BaseAgentRuntimeProvider {
 
     return (await (client as any).post(`/v1/skills/${encodeURIComponent(skillId)}/versions?beta=true`, {
       body: formData,
-      headers: { 'anthropic-beta': 'skills-2025-10-02' },
+      headers: { 'anthropic-beta': SKILLS_BETA },
     })) as { version: string | null };
   }
 }

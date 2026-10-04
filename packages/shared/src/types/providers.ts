@@ -28,6 +28,7 @@ export enum CredentialsKeyEnum {
   RedirectUrl = 'redirectUrl',
   Hmac = 'hmac',
   IpPoolName = 'ipPoolName',
+  ConfigurationSetName = 'configurationSetName',
   ApiKeyRequestHeader = 'apiKeyRequestHeader',
   SecretKeyRequestHeader = 'secretKeyRequestHeader',
   IdPath = 'idPath',
@@ -59,6 +60,16 @@ export enum CredentialsKeyEnum {
   ExternalEnvironmentId = 'externalEnvironmentId',
   /** Claude Platform on AWS: workspace ID (`wrkspc_…`) required for agent runtime dispatch. */
   ExternalWorkspaceId = 'externalWorkspaceId',
+  /** HTTP method for custom webhook delivery (e.g. POST, PUT). */
+  Method = 'method',
+  /** Custom webhook request headers as JSON. */
+  Headers = 'headers',
+  /** Custom webhook request body template. */
+  Body = 'body',
+  /** Tool-webhook routing mode: static (integration URL) or dynamic (per-subscriber endpoints). */
+  RoutingMode = 'routingMode',
+  /** Email webhook: how the HMAC secret key value is interpreted when signing webhook calls. */
+  HmacSecretKeyEncoding = 'hmacSecretKeyEncoding',
 }
 
 export type ConfigurationKey = keyof IConfigurations;
@@ -130,11 +141,13 @@ export enum SmsProviderIdEnum {
   Sinch = 'sinch',
   ISendProSms = 'isendpro-sms',
   CmTelecom = 'cm-telecom',
+  RuachSms = 'ruach-sms',
 }
 
 export enum ChatProviderIdEnum {
   Slack = 'slack',
   Discord = 'discord',
+  GoogleChat = 'google-chat',
   MsTeams = 'msteams',
   WebexMessaging = 'webex-messaging',
   Mattermost = 'mattermost',
@@ -149,6 +162,8 @@ export enum ChatProviderIdEnum {
   Novu = 'novu-slack',
   Telegram = 'telegram',
   Sendblue = 'sendblue',
+  PhotonImessage = 'photon-imessage',
+  NovuWebChat = 'novu-web-chat',
 }
 
 export enum PushProviderIdEnum {
@@ -172,6 +187,13 @@ export enum AgentRuntimeProviderIdEnum {
   AnthropicAws = 'anthropic-aws',
 }
 
+export enum ToolProviderIdEnum {
+  PagerDuty = 'pagerduty',
+  Opsgenie = 'opsgenie',
+  Grafana = 'grafana',
+  Webhook = 'tool-webhook',
+}
+
 /** Distinguishes integrations used for notification delivery from those used as agent runtimes. */
 export enum IntegrationKindEnum {
   DELIVERY = 'delivery',
@@ -184,7 +206,8 @@ export type ProvidersIdEnum =
   | PushProviderIdEnum
   | InAppProviderIdEnum
   | ChatProviderIdEnum
-  | AgentRuntimeProviderIdEnum;
+  | AgentRuntimeProviderIdEnum
+  | ToolProviderIdEnum;
 
 export const ProvidersIdEnumConst = {
   EmailProviderIdEnum,
@@ -193,6 +216,7 @@ export const ProvidersIdEnumConst = {
   InAppProviderIdEnum,
   ChatProviderIdEnum,
   AgentRuntimeProviderIdEnum,
+  ToolProviderIdEnum,
 };
 
 export const providerIdValues = [

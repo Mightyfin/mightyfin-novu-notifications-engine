@@ -28,7 +28,7 @@ export class UpdateIntegrationCommand extends OrganizationCommand {
 
   @IsOptional()
   @IsMongoId()
-  userEnvironmentId: string;
+  userEnvironmentId?: string;
 
   @IsDefined()
   @IsMongoId()
@@ -47,6 +47,10 @@ export class UpdateIntegrationCommand extends OrganizationCommand {
   @IsArray()
   @ValidateNested({ each: true })
   conditions?: MessageFilter[];
+
+  @IsOptional()
+  @IsObject()
+  rules?: Record<string, unknown> | null;
 
   @IsOptional()
   @IsObject()

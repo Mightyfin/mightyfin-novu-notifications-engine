@@ -5,18 +5,15 @@ import {
   SeverityLevelEnum,
   ShortIsPrefixEnum,
   StepTypeEnum,
-  WorkflowCreateAndUpdateKeys,
   WorkflowStatusEnum,
 } from '@novu/shared';
 import { WorkflowPreferencesResponseDto } from '../dtos/workflow/preferences.response.dto';
-import { RuntimeIssueDto } from '../dtos/workflow/runtime-issue.dto';
 import { StepResponseDto } from '../dtos/workflow/step.response.dto';
 import { StepListResponseDto } from '../dtos/workflow/step-list-response.dto';
 import { WorkflowListResponseDto } from '../dtos/workflow/workflow-list-response.dto';
 import { WorkflowResponseDto } from '../dtos/workflow/workflow-response.dto';
 import { WorkflowForResponseMapper, WorkflowWithPreferencesForMapper } from '../types/workflow-mapper.types';
 import { buildSlug } from './build-slug';
-
 export function toResponseWorkflowDto(
   workflow: WorkflowWithPreferencesForMapper,
   steps: StepResponseDto[],
@@ -52,13 +49,14 @@ export function toResponseWorkflowDto(
         }
       : undefined,
     status: workflow.status || WorkflowStatusEnum.ACTIVE,
-    issues: workflow.issues as unknown as Record<WorkflowCreateAndUpdateKeys, RuntimeIssueDto>,
+    issues: workflow.issues,
     lastTriggeredAt: workflow.lastTriggeredAt,
     payloadSchema: workflow.payloadSchema as object | undefined,
     payloadExample,
     validatePayload: workflow.validatePayload || false,
     isTranslationEnabled: workflow.isTranslationEnabled || false,
     severity: workflow.severity || SeverityLevelEnum.NONE,
+    agent: workflow.agent ?? null,
   };
 }
 

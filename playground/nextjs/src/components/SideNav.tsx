@@ -10,6 +10,7 @@ type LinkType = {
 
 const LINKS: LinkType[] = [
   { href: '/agent-toolkit', label: 'Refund Agent (HITL)', category: 'AI' },
+  { href: '/agent-human', label: 'Framework HITL (ctx.ask)', category: 'AI' },
   { href: '/', label: 'Default Inbox', category: 'Components' },
   { href: '/keyless', label: 'Keyless Inbox', category: 'Components' },
   { href: '/render-bell', label: 'Render Bell', category: 'Components' },
@@ -20,6 +21,9 @@ const LINKS: LinkType[] = [
   { href: '/connect-msteams', label: 'Connect MS Teams', category: 'Components' },
   { href: '/connect-telegram', label: 'Connect Telegram', category: 'Components' },
   { href: '/connect-telegram-end-user', label: 'Connect Telegram (End User)', category: 'Components' },
+  { href: '/connect-pagerduty-end-user', label: 'Connect PagerDuty (End User)', category: 'Components' },
+  { href: '/connect-grafana-end-user', label: 'Connect Grafana (End User)', category: 'Components' },
+  { href: '/connect-opsgenie-end-user', label: 'Connect Opsgenie (End User)', category: 'Components' },
   { href: '/subscription', label: 'Subscription', category: 'Components' },
   { href: '/subscription-components', label: 'Subscription Components', category: 'Components' },
   { href: '/subscription-hooks', label: 'Subscription Hooks', category: 'Components' },

@@ -7,10 +7,10 @@ The LINE chat integration lets you send messages to subscribers who have added y
 
 Supported message types:
 
-- **Text** — default workflow chat step content
-- **Flex Message** — rich layouts via trigger overrides
-- **Image** — image messages via trigger overrides
-- **Sticker** — sticker messages via trigger overrides
+- **Text** - default workflow chat step content
+- **Flex Message** - rich layouts via trigger overrides
+- **Image** - image messages via trigger overrides
+- **Sticker** - sticker messages via trigger overrides
 
 ## Configure a LINE Messaging API channel
 
@@ -26,7 +26,7 @@ Before connecting LINE in Novu, create a Messaging API channel in the LINE Devel
   </Step>
 
   <Step title="Issue a Channel Access Token">
-    Open your channel, go to the **Messaging API** tab, and issue a **Channel access token** (long-lived). Copy the token — you will paste it into Novu.
+    Open your channel, go to the **Messaging API** tab, and issue a **Channel access token** (long-lived). Copy the token - you will paste it into Novu.
   </Step>
 
   <Step title="Enable webhooks (recommended)">
@@ -127,11 +127,11 @@ await novu.trigger({
 });
 ```
 
-The chat step content is sent as a plain text LINE message unless you override the message type at trigger time.
+The chat step content is sent as a LINE text message by default. Block or card content is converted to a text/markdown-style fallback. Use trigger overrides for `flex`, `image`, or `sticker` when you need LINE-native message types. See [Writing chat templates](/platform/integrations/chat/writing-chat-template).
 
 ## Rich message types
 
-Pass `flex`, `image`, or `sticker` under `overrides.chat` when triggering a workflow. When present, Novu sends that message type instead of plain text.
+Pass `flex`, `image`, or `sticker` under `overrides.chat` when triggering a workflow. When present, Novu sends that message type instead of the rendered Chat step text.
 
 <Tabs>
   <Tab title="Sticker">

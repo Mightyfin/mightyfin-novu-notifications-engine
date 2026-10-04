@@ -18,7 +18,6 @@ import {
 import {
   AgentRuntimeProviderIdEnum,
   buildClaudePlatformVaultUrl,
-  buildConnectSubscriberId,
   McpConnectionAuthModeEnum,
   McpConnectionStatusEnum,
 } from '@novu/shared';
@@ -105,14 +104,15 @@ describe('EnsureProviderManagedVault', () => {
 
     agentRepository.findOne.resolves(makeManagedAgent() as never);
     integrationRepository.findOne.resolves({ credentials: { apiKey: 'sk-test' } } as never);
-    subscriberRepository.findBySubscriberId.withArgs(ENV_ID, buildConnectSubscriberId(USER_ID)).resolves({
+    subscriberRepository.findBySubscriberId.withArgs(ENV_ID, USER_ID).resolves({
       _id: SUBSCRIBER_MONGO_ID,
-      subscriberId: buildConnectSubscriberId(USER_ID),
+      subscriberId: USER_ID,
     } as never);
     agentMcpServerRepository.findByAgent.resolves([{ _id: ENABLEMENT_ID }] as never);
     agentMcpServerRepository.findByAgentAndMcpId.resolves({
       _id: ENABLEMENT_ID,
       mcpId: 'slack',
+      enabled: true,
       defaultAuthMode: McpConnectionAuthModeEnum.ProviderManaged,
     } as never);
     mcpConnectionRepository.findSubscriberExternalVaultId.resolves(null);
@@ -238,20 +238,18 @@ describe('EnsureProviderManagedVault', () => {
     expect(agentMcpServerRepository.findByAgentAndMcpId.calledOnce).to.equal(true);
   });
 
-  it('prefers the connect: subscriber row over the legacy dashboard user id', async () => {
+  it('resolves the dashboard user subscriber id', async () => {
     await useCase.execute(makeCommand());
 
-    expect(subscriberRepository.findBySubscriberId.firstCall.args).to.deep.equal([
-      ENV_ID,
-      buildConnectSubscriberId(USER_ID),
-    ]);
+    expect(subscriberRepository.findBySubscriberId.firstCall.args).to.deep.equal([ENV_ID, USER_ID]);
     expect(createOrUpdateSubscriber.execute.called).to.equal(false);
   });
 
   it('reuses a vault id already stored on a concurrent-winner connection row', async () => {
     mcpConnectionRepository.findSubscriberConnection.onFirstCall().resolves(null);
+    mcpConnectionRepository.findSubscriberConnection.onSecondCall().resolves(null);
     mcpConnectionRepository.create.rejects(new Error('duplicate key'));
-    mcpConnectionRepository.findSubscriberConnection.onSecondCall().resolves({
+    mcpConnectionRepository.findSubscriberConnection.onThirdCall().resolves({
       _id: 'conn_winner',
       auth: { externalVaultId: 'vlt_winner' },
     } as never);
@@ -259,6 +257,7 @@ describe('EnsureProviderManagedVault', () => {
     const result = await useCase.execute(makeCommand());
 
     expect(result.externalVaultId).to.equal('vlt_winner');
+    expect(mcpConnectionRepository.create.calledOnce).to.equal(true);
     expect(mcpConnectionVaultService.ensureConnectionVault.called).to.equal(false);
   });
 
@@ -293,7 +292,7 @@ describe('EnsureProviderManagedVault', () => {
       }
     });
 
-    it('resolves the channel subscriber directly without falling back to connect:<userId>', async () => {
+    it('resolves the channel subscriber directly without falling back to the dashboard user id', async () => {
       const result = await useCase.executeForSetupCard(makeCommand({ subscriberId: CHANNEL_SUBSCRIBER_ID }));
 
       // The setup-card flow returns a signed Novu intermediate URL that
@@ -306,6 +305,28 @@ describe('EnsureProviderManagedVault', () => {
       // Side-effect bug fix: must not promote the row to `connected` during
       // card construction; promotion happens via the redirect endpoint.
       expect(mcpConnectionRepository.update.called).to.equal(false);
+      // Security: a model-driven subscriber turn must not enable agent-wide MCP
+      // config — it may only provision a vault for an already-enabled MCP.
+      expect(enableAgentMcpServer.execute.called).to.equal(false);
+    });
+
+    it('refuses to provision a vault for an MCP the agent has not enabled', async () => {
+      agentMcpServerRepository.findByAgentAndMcpId.resolves({
+        _id: ENABLEMENT_ID,
+        mcpId: 'slack',
+        enabled: false,
+        defaultAuthMode: McpConnectionAuthModeEnum.ProviderManaged,
+      } as never);
+
+      try {
+        await useCase.executeForSetupCard(makeCommand({ subscriberId: CHANNEL_SUBSCRIBER_ID }));
+        expect.fail('Expected UnprocessableEntityException');
+      } catch (err) {
+        expect(err).to.be.instanceOf(UnprocessableEntityException);
+      }
+
+      expect(enableAgentMcpServer.execute.called).to.equal(false);
+      expect(mcpConnectionVaultService.ensureConnectionVault.called).to.equal(false);
     });
 
     it('throws NotFoundException when the channel subscriber cannot be found', async () => {

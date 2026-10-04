@@ -23,7 +23,6 @@ import {
 import {
   AgentRuntimeProviderIdEnum,
   buildClaudePlatformVaultUrl,
-  buildConnectSubscriberId,
   isClaudePlatformConsoleProvider,
   MCP_SERVERS,
   McpConnectionAuthModeEnum,
@@ -62,8 +61,11 @@ export type EnsureProviderManagedVaultResult = {
  *      cleanly when the provider is not Claude platform (NovuAnthropic /
  *      anything else doesn't expose a vault deep link, so the redirect would
  *      go nowhere).
- *   4. Idempotently enable the MCP on the agent (the existing
- *      `EnableAgentMcpServer` usecase already syncs the provider projection).
+ *   4. Resolve the agent's enablement row for the MCP. The dashboard
+ *      `org:agent:write` path (`execute`) idempotently enables it via the
+ *      existing `EnableAgentMcpServer` usecase; the subscriber setup-card path
+ *      (`executeForSetupCard`) only requires an already-enabled row and never
+ *      mutates agent-wide config from a model-supplied `service_id`.
  *   5. Reuse the subscriber's existing vault when a sibling MCP row already
  *      owns one; otherwise create a fresh `vlt_…` container via the runtime
  *      provider and race-safely claim it on Mongo.
@@ -96,7 +98,7 @@ export class EnsureProviderManagedVault {
    * triggering a managed-agent setup card and return the deep link the in-thread
    * "Connect from provider" button opens. Mirrors `execute` but resolves the
    * subscriber from the inbound `subscriberId` instead of mapping a dashboard
-   * `userId` to `connect:<userId>`.
+   * `userId` to the dashboard subscriber row.
    */
   async executeForSetupCard(command: EnsureProviderManagedVaultCommand): Promise<EnsureProviderManagedVaultResult> {
     if (!command.subscriberId) {
@@ -108,7 +110,17 @@ export class EnsureProviderManagedVault {
     // clicks the in-channel link, which is intercepted by the Novu redirect
     // endpoint (the click is the user-intent signal — provider-managed MCPs
     // have no Novu OAuth callback that could confirm OAuth completion).
-    const internal = await this.executeInternal(command, { markConnectedOnProvision: false });
+    //
+    // `enableIfMissing: false` — this path is reached from a model-driven
+    // `novu_tool_catalog` request_connect on a subscriber turn, which is NOT
+    // gated by `org:agent:write`. It must never create/re-enable the agent-wide
+    // `agent_mcp_server` row from a model-supplied `service_id`; it may only
+    // provision a vault for an MCP an admin already enabled (mirrors
+    // `GenerateMcpOAuthUrl.loadAuthorizeContext`, which requires an enabled row).
+    const internal = await this.executeInternal(command, {
+      markConnectedOnProvision: false,
+      enableIfMissing: false,
+    });
 
     const apiKey = await this.getEnvironmentApiKey(command.environmentId);
     const signedState = signProviderManagedRedirectState(
@@ -123,6 +135,14 @@ export class EnsureProviderManagedVault {
         externalVaultId: internal.externalVaultId,
         ...(internal.externalWorkspaceId ? { externalWorkspaceId: internal.externalWorkspaceId } : {}),
         ...(command.conversationId ? { conversationId: command.conversationId } : {}),
+        // Tool-call context so `CompleteProviderManagedRedirect` can resolve the
+        // parked `novu_tool_catalog` request_connect call when the user clicks
+        // the in-channel link (mirrors the OAuth callback resolving its tool call).
+        ...(command.toolUseId ? { toolUseId: command.toolUseId } : {}),
+        ...(command.agentIdentifier ? { agentIdentifier: command.agentIdentifier } : {}),
+        ...(command.integrationIdentifier ? { integrationIdentifier: command.integrationIdentifier } : {}),
+        ...(command.platform ? { platform: command.platform } : {}),
+        ...(command.platformThreadId ? { platformThreadId: command.platformThreadId } : {}),
         timestamp: Date.now(),
       },
       apiKey
@@ -138,7 +158,13 @@ export class EnsureProviderManagedVault {
     // Dashboard "Add from Claude" flow: the user explicitly clicked the
     // button, so we treat the click as intent and promote the connection
     // to `connected` so the "Added from Claude" badge can light up.
-    const internal = await this.executeInternal(command, { markConnectedOnProvision: true });
+    //
+    // `enableIfMissing: true` — this path is the `org:agent:write`-guarded
+    // dashboard action, so enabling the MCP on the agent here is authorized.
+    const internal = await this.executeInternal(command, {
+      markConnectedOnProvision: true,
+      enableIfMissing: true,
+    });
 
     return {
       vaultUrl: buildClaudePlatformVaultUrl(internal.externalVaultId, internal.externalWorkspaceId),
@@ -158,9 +184,10 @@ export class EnsureProviderManagedVault {
     return environment.apiKeys[0].key;
   }
 
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: exhaustive mapping over MCP servers
   private async executeInternal(
     command: EnsureProviderManagedVaultCommand,
-    options: { markConnectedOnProvision: boolean }
+    options: { markConnectedOnProvision: boolean; enableIfMissing: boolean }
   ): Promise<{
     externalVaultId: string;
     externalWorkspaceId?: string;
@@ -255,8 +282,10 @@ export class EnsureProviderManagedVault {
     // and re-asserts the provider-managed feature flag. We rely on its
     // idempotent ConflictException-on-already-enabled semantics by catching
     // and re-reading the existing row — running the dedicated endpoint a
-    // second time should NOT error.
-    const enablement = await this.ensureEnablementRow(command);
+    // second time should NOT error. When `enableIfMissing` is false (subscriber
+    // setup-card path) we skip enabling entirely and require an existing
+    // enabled row instead.
+    const enablement = await this.ensureEnablementRow(command, options.enableIfMissing);
 
     const agentMcpServerIds = (
       await this.agentMcpServerRepository.findByAgent({
@@ -338,9 +367,8 @@ export class EnsureProviderManagedVault {
    * - When `command.subscriberId` is set (managed-agent setup-card flow), use
    *   the channel subscriber directly. The vault must belong to the person
    *   triggering the agent in Slack/Teams, not the dashboard admin.
-   * - Otherwise (dashboard "Add from Claude") map `userId` to a
-   *   `connect:<userId>` subscriber, falling back to the legacy raw `userId`
-   *   row before provisioning a fresh one.
+   * - Otherwise (dashboard "Add from Claude") map `userId` to the same
+   *   subscriber id used by workflow testing / agent onboarding.
    */
   private async resolveSubscriber(
     command: EnsureProviderManagedVaultCommand
@@ -358,27 +386,18 @@ export class EnsureProviderManagedVault {
       return channelSubscriber;
     }
 
-    const connectSubscriberId = buildConnectSubscriberId(command.userId);
-    const connectSubscriber = await this.subscriberRepository.findBySubscriberId(
-      command.environmentId,
-      connectSubscriberId
-    );
+    const subscriberId = command.userId;
+    const existingSubscriber = await this.subscriberRepository.findBySubscriberId(command.environmentId, subscriberId);
 
-    if (connectSubscriber) {
-      return connectSubscriber;
-    }
-
-    const legacySubscriber = await this.subscriberRepository.findBySubscriberId(command.environmentId, command.userId);
-
-    if (legacySubscriber) {
-      return legacySubscriber;
+    if (existingSubscriber) {
+      return existingSubscriber;
     }
 
     const created = await this.createOrUpdateSubscriber.execute(
       CreateOrUpdateSubscriberCommand.create({
         environmentId: command.environmentId,
         organizationId: command.organizationId,
-        subscriberId: connectSubscriberId,
+        subscriberId,
         allowUpdate: false,
       })
     );
@@ -391,28 +410,37 @@ export class EnsureProviderManagedVault {
   }
 
   /**
-   * Enable the catalog MCP on the agent and read back the enablement row.
-   * Treat a `ConflictException` (already enabled) as success — the row
-   * still exists with the correct `defaultAuthMode`, and we want this
-   * usecase to be idempotent for retries / reloads from the dashboard.
+   * Resolve the agent's enablement row for the MCP.
+   *
+   * - `enableIfMissing: true` (dashboard `org:agent:write` action): enable the
+   *   catalog MCP on the agent, treating a `ConflictException` (already enabled)
+   *   as idempotent success, then read the row back.
+   * - `enableIfMissing: false` (subscriber setup-card path): do NOT enable —
+   *   require an already-enabled row. A model-driven request_connect must not be
+   *   able to create/re-enable agent-wide MCP config from a supplied `service_id`
+   *   (that write is reserved to the permissioned dashboard path). This also
+   *   allowlists the requested `mcpId` against existing enablements, mirroring
+   *   `GenerateMcpOAuthUrl.loadAuthorizeContext`.
    */
-  private async ensureEnablementRow(command: EnsureProviderManagedVaultCommand) {
-    try {
-      await this.enableAgentMcpServer.execute(
-        EnableAgentMcpServerCommand.create({
-          userId: command.userId,
-          environmentId: command.environmentId,
-          organizationId: command.organizationId,
-          agentIdentifier: command.agentIdentifier,
-          mcpId: command.mcpId,
-        })
-      );
-    } catch (err) {
-      // ConflictException is the documented "already enabled and healthy"
-      // signal. Anything else (catalog mismatch, flag off, sync failure)
-      // bubbles up to the caller untouched.
-      if (!(err instanceof ConflictException)) {
-        throw err;
+  private async ensureEnablementRow(command: EnsureProviderManagedVaultCommand, enableIfMissing: boolean) {
+    if (enableIfMissing) {
+      try {
+        await this.enableAgentMcpServer.execute(
+          EnableAgentMcpServerCommand.create({
+            userId: command.userId,
+            environmentId: command.environmentId,
+            organizationId: command.organizationId,
+            agentIdentifier: command.agentIdentifier,
+            mcpId: command.mcpId,
+          })
+        );
+      } catch (err) {
+        // ConflictException is the documented "already enabled and healthy"
+        // signal. Anything else (catalog mismatch, flag off, sync failure)
+        // bubbles up to the caller untouched.
+        if (!(err instanceof ConflictException)) {
+          throw err;
+        }
       }
     }
 
@@ -436,8 +464,13 @@ export class EnsureProviderManagedVault {
       mcpId: command.mcpId,
     });
 
-    if (!enablement) {
-      throw new UnprocessableEntityException(`Enablement row was not created for MCP "${command.mcpId}".`);
+    // Require an enabled row on both paths: the dashboard path just enabled it,
+    // and the setup-card path must refuse to provision a vault for an MCP the
+    // agent has not been granted.
+    if (!enablement || !enablement.enabled) {
+      throw new UnprocessableEntityException(
+        `MCP "${command.mcpId}" is not enabled on agent "${command.agentIdentifier}".`
+      );
     }
 
     return enablement;

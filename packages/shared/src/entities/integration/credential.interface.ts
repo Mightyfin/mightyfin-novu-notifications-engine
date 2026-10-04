@@ -26,6 +26,8 @@ export interface ICredentials {
   redirectUrl?: string;
   hmac?: boolean;
   ipPoolName?: string;
+  /** Amazon SES: name of the Configuration Set applied to sent emails. */
+  configurationSetName?: string;
   apiKeyRequestHeader?: string;
   secretKeyRequestHeader?: string;
   idPath?: string;
@@ -124,4 +126,22 @@ export interface ICredentials {
   externalWorkspaceId?: string;
   /** When true, WhatsApp credentials were provisioned via Novu Tech Provider Embedded Signup; app secret is resolved from platform env. */
   isNovuManaged?: boolean;
+  /** HTTP method for custom webhook delivery (e.g. POST, PUT). */
+  method?: string;
+  /** Custom webhook request headers as JSON. */
+  headers?: string;
+  /** Custom webhook request body template. */
+  body?: string;
+  /**
+   * Tool-webhook routing mode. `'static'` sends to the integration `webhookUrl`;
+   * `'dynamic'` fans out to per-subscriber `tool_webhook` endpoints. Missing = static.
+   */
+  routingMode?: 'static' | 'dynamic';
+  /**
+   * Email webhook: how the `secretKey` value is interpreted when computing the
+   * `X-Novu-Signature` header. `'text'` (default) signs with the raw UTF-8 bytes of
+   * the stored secret; `'base64'` and `'hex'` decode it to binary first — required
+   * when the verification side (e.g. AWS KMS) holds the key as binary material.
+   */
+  hmacSecretKeyEncoding?: 'text' | 'base64' | 'hex';
 }

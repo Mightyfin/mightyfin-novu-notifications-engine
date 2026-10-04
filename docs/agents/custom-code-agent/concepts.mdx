@@ -1,6 +1,6 @@
 ---
 title: "Concepts"
-description: "Understand the entities, lifecycle, and handler building blocks that make up a Novu custom code agent, from bridge endpoints to event handlers."
+description: "Agent entities, lifecycle, and handler building blocks for custom code agents: bridge, handlers, and provider routing."
 ---
 
 
@@ -54,7 +54,7 @@ Later resolution upgrades them to a full subscriber. Identity is provider-aware 
 
 ## Bridge surface
 
-The same handler API applies no matter which provider sent the event or which model you use. Your app exposes a bridge endpoint where Novu calls your handlers — see [Connecting your app](/agents/custom-code-agent/connecting-your-app) for project structure, `serve()`, and environment variables.
+The same handler API applies no matter which provider sent the event or which model you use. Your app exposes a bridge endpoint where Novu calls your handlers - see [Connecting your app](/agents/custom-code-agent/connecting-your-app) for project structure, `serve()`, and environment variables.
 
 ### Event handlers
 
@@ -95,6 +95,8 @@ That object is the only interface your code needs. You do not integrate Slack, T
 
 Replies talk to the user; signals update the system around the conversation. One handler turn can reply, set metadata, trigger a workflow, and resolve.
 
+[`ctx.emit`](/agents/custom-code-agent/building-blocks/emit) sends a named payload on the turn. It is not a reply and not a signal. Web Chat renders it as a `data` part.
+
 Signals queue in memory and batch with your next `ctx.reply()` in one request. If the handler exits without calling `ctx.reply()`, pending signals still send.
 
 ## Conversations and workflows
@@ -102,7 +104,7 @@ Signals queue in memory and batch with your next `ctx.reply()` in one request. I
 Conversations and Novu workflows share the same account:
 
 - **Conversation to workflow:** User asks in Slack for a report by email; handler calls `ctx.trigger()` and an existing workflow sends the email.
-- **Workflow to conversation:** User replies to a digest email; that reply opens a new agent conversation.
+- **Workflow to conversation:** Assign an agent on the workflow so chat and email steps send as that agent. When the subscriber replies, Novu opens an agent conversation and hydrates `ctx.notification` with the original payload. See [Workflow-assigned agents](/agents/workflow-agents).
 
 ACI extends Novu's workflow system; it does not replace it. Transactional workflows and open-ended chat work together on one platform.
 
@@ -151,14 +153,14 @@ The same handler code works on every connected provider; adding a provider does 
 ## Next steps
 
 <Columns cols={2}>
-  <Card icon="house" href="/agents/custom-code-agent/quickstart" title="Quickstart">
-    Create an agent, connect Slack, and get a reply in-thread.
+  <Card icon="plug" href="/agents/get-started/ai-sdk" title="Connect AI SDK">
+    Connect an existing agent to Slack and get a reply in-thread.
   </Card>
-  <Card icon="sparkles" href="/agents/custom-code-agent/frameworks/ai-sdk" title="AI SDK">
-    Build end to end with `@novu/framework/ai-sdk`.
+  <Card icon="sparkles" href="/agents/custom-code-agent/frameworks/ai-sdk" title="AI SDK reference">
+    Adapter API for `@novu/framework/ai-sdk`.
   </Card>
-  <Card icon="link" href="/agents/custom-code-agent/frameworks/langchain" title="LangChain">
-    Build end to end with `@novu/framework/langchain`.
+  <Card icon="link" href="/agents/custom-code-agent/frameworks/langchain" title="LangChain reference">
+    Adapter API for `@novu/framework/langchain`.
   </Card>
   <Card icon="code" href="/api-reference/agents/agent-schema" title="Agents API reference">
     Create agents, link providers, and update bridge URLs programmatically.

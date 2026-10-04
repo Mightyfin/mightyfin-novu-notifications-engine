@@ -6,7 +6,7 @@ import { Command } from 'commander';
 import { v4 as uuidv4 } from 'uuid';
 import { DevCommandOptions, devCommand } from './commands';
 import { connectCommand } from './commands/connect';
-import { isDashboardOnlyChannel } from './commands/connect/dashboard-urls';
+import { DASHBOARD_ONLY_CHANNELS, isDashboardOnlyChannel } from './commands/connect/dashboard-urls';
 import { CONNECT_HELP_TEXT } from './commands/connect/help-text';
 import type { LlmAuthCliChoice } from './commands/connect/pipeline/llm-auth/types';
 import type { ConnectCommandInput } from './commands/connect/resolve-options';
@@ -199,6 +199,7 @@ program
     'Override the Connect browser-auth URL (default follows --region, e.g. dashboard.novu.co)'
   )
   .option('--region <region>', `Novu region (${Object.values(CloudRegionEnum).join(' | ')})`, CloudRegionEnum.US)
+  .option('--staging', 'Shorthand for --region staging', false)
   .option(
     '--prompt <text>',
     'Pre-fill the agent description (alternative to positional <prompt>; positional wins when both are set)'
@@ -215,6 +216,7 @@ program
     '--agent-integration-id <id>',
     'Use an existing agent-runtime integration (skips credential setup for BYOK runtimes)'
   )
+  .option('--agent-identifier <identifier>', 'Use an existing agent by identifier (skips the agent picker)')
   .option('--anthropic-api-key <key>', 'Anthropic API key for --runtime claude non-interactive runs')
   .option(
     '--llm-auth <choice>',
@@ -226,7 +228,7 @@ program
   .option('--aws-claude-workspace-id <id>', 'AWS Claude workspace ID for --runtime claude-aws')
   .option(
     '--channel <name>',
-    `Channel to connect (required in --ci mode). One of: ${CHANNEL_CHOICES.join(', ')}. whatsapp/teams require dashboard OAuth (omit --keyless)`
+    `Channel to connect (required in --ci mode). One of: ${CHANNEL_CHOICES.join(', ')}. ${DASHBOARD_ONLY_CHANNELS.join('/')} require dashboard OAuth (omit --keyless)`
   )
   .option('--skip-slack', 'Create the agent and exit; do not connect any channel (equivalent to --channel skip)', false)
   .option(
@@ -251,6 +253,10 @@ program
     'Recipient phone (E.164) for the Sendblue test message. CI-only escape hatch — omit to enter interactively'
   )
   .option(
+    '--web-chat-setup <mode>',
+    'Web Chat post-connect setup for --ci: scaffold | embed | skip (auto-detect when omitted)'
+  )
+  .option(
     '--ci',
     'Non-interactive mode (no Ink TUI). Requires a prompt (positional <prompt> or --prompt) and --channel; see examples below',
     false
@@ -272,23 +278,23 @@ program
       const channel = options.skipSlack ? 'skip' : options.channel;
       const connectMode = options.chatSdk ? 'chat-sdk' : options.brain === 'chat-sdk' ? 'chat-sdk' : options.runtime;
 
-      if (!prompt && (!connectMode || !isBridgeConnectMode(connectMode))) {
+      if (!prompt && !options.agentIdentifier?.trim() && (!connectMode || !isBridgeConnectMode(connectMode))) {
         console.error(
-          'Non-interactive mode requires a prompt (positional <prompt> or --prompt), unless --runtime is a bridge mode (ai-sdk, langchain, custom-code, chat-sdk).\n(run `novu connect --help` for the non-interactive contract and examples)'
+          'Non-interactive mode requires a prompt (positional <prompt> or --prompt), --agent-identifier, or --runtime as a bridge mode (ai-sdk, langchain, custom-code, chat-sdk).\n(run `novu connect --help` for the non-interactive contract and examples)'
         );
         process.exit(1);
       }
 
       if (!channel) {
         console.error(
-          'Non-interactive mode requires --channel <slack|email|telegram|sendblue|skip> (or <whatsapp|teams> without --keyless).\n(run `novu connect --help` for the non-interactive contract and examples)'
+          'Non-interactive mode requires --channel <slack|email|telegram|whatsapp|sendblue|web-chat|skip> (or teams without --keyless).\n(run `novu connect --help` for the non-interactive contract and examples)'
         );
         process.exit(1);
       }
 
       if (options.channel && isDashboardOnlyChannel(options.channel as ChannelChoice) && options.keyless) {
         console.error(
-          'Non-interactive mode does not support --channel whatsapp or --channel teams with --keyless. Omit --keyless to authenticate via the dashboard, or use the Novu dashboard instead.\n(run `novu connect --help` for the non-interactive contract and examples)'
+          `Non-interactive mode does not support --channel ${options.channel} with --keyless. Omit --keyless to authenticate via the dashboard, or use the Novu dashboard instead.\n(run \`novu connect --help\` for the non-interactive contract and examples)`
         );
         process.exit(1);
       }
@@ -321,6 +327,16 @@ program
       console.error(`Invalid --llm-auth value: "${options.llmAuth}". Expected one of: ${LLM_AUTH_CHOICES.join(', ')}.`);
       process.exit(1);
     }
+    const WEB_CHAT_SETUP_CHOICES = ['scaffold', 'embed', 'skip'] as const;
+    if (
+      options.webChatSetup &&
+      !WEB_CHAT_SETUP_CHOICES.includes(options.webChatSetup as 'scaffold' | 'embed' | 'skip')
+    ) {
+      console.error(
+        `Invalid --web-chat-setup value: "${options.webChatSetup}". Expected one of: ${WEB_CHAT_SETUP_CHOICES.join(', ')}.`
+      );
+      process.exit(1);
+    }
     let resolved: ReturnType<typeof resolveConnectCommandOptions>;
     try {
       resolved = resolveConnectCommandOptions({
@@ -330,6 +346,7 @@ program
         channel: options.channel as ChannelChoice | undefined,
         runtime: options.runtime as AgentConnectMode | undefined,
         chatSdk: options.chatSdk,
+        webChatSetup: options.webChatSetup as import('./commands/connect/types').WebChatSetupMode | undefined,
         apiUrl: options.apiUrl ?? NOVU_API_URL,
       });
     } catch (error) {

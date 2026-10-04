@@ -200,6 +200,22 @@ describe('safe-outbound-http', () => {
       expect(response.statusCode).toBe(200);
       expect(response.body).toEqual({ ok: true, path: '/ping' });
     });
+
+    it('never allows link-local or IMDS addresses even when allow-listed', async () => {
+      process.env.NOVU_SAFE_OUTBOUND_ALLOW = '169.254.169.254,.metadata.internal';
+      resetOutboundSsrfAllowListCacheForTests();
+
+      await expect(safeOutboundRequest({ url: 'http://169.254.169.254/latest/meta-data/' })).rejects.toMatchObject({
+        reason: 'PRIVATE_IP',
+      });
+
+      vi.spyOn(dns.promises, 'lookup').mockResolvedValue([{ address: '169.254.169.254', family: 4 }] as never);
+
+      await expect(safeOutboundRequest({ url: 'http://imds.metadata.internal/' })).rejects.toMatchObject({
+        reason: 'PRIVATE_IP',
+        resolvedAddress: '169.254.169.254',
+      });
+    });
   });
 
   describe('DNS rebinding defense', () => {
@@ -227,6 +243,54 @@ describe('safe-outbound-http', () => {
       // 3 attempts → 3 DNS lookups (no caching window the attacker can exploit).
       expect(lookup).toHaveBeenCalledTimes(3);
     });
+  });
+
+  it('strips observability propagation headers while keeping application headers', async () => {
+    dnsLocalhost();
+
+    await safeOutboundRequest({
+      url: `${upstreamUrl}/webhook`,
+      method: 'POST',
+      headers: {
+        traceparent: '00-trace-span-01',
+        tracestate: 'vendor=value',
+        baggage: 'tenant=secret',
+        b3: 'trace-span-1',
+        'x-b3-traceid': 'trace',
+        'x-b3-spanid': 'span',
+        'x-b3-parentspanid': 'parent',
+        'x-b3-sampled': '1',
+        'x-b3-flags': '1',
+        newrelic: 'new-relic-payload',
+        'x-newrelic-id': 'legacy-new-relic-id',
+        'x-newrelic-transaction': 'legacy-new-relic-transaction',
+        'sentry-trace': 'sentry-payload',
+        'x-trace-id': 'application-trace-id',
+        'x-request-id': 'application-request-id',
+        authorization: 'Bearer application-token',
+      },
+      body: { ok: true },
+    });
+
+    expect(upstreamHits).toHaveLength(1);
+    const hit = upstreamHits[0]!;
+
+    expect(hit.headers.traceparent).toBeUndefined();
+    expect(hit.headers.tracestate).toBeUndefined();
+    expect(hit.headers.baggage).toBeUndefined();
+    expect(hit.headers.b3).toBeUndefined();
+    expect(hit.headers['x-b3-traceid']).toBeUndefined();
+    expect(hit.headers['x-b3-spanid']).toBeUndefined();
+    expect(hit.headers['x-b3-parentspanid']).toBeUndefined();
+    expect(hit.headers['x-b3-sampled']).toBeUndefined();
+    expect(hit.headers['x-b3-flags']).toBeUndefined();
+    expect(hit.headers.newrelic).toBeUndefined();
+    expect(hit.headers['x-newrelic-id']).toBeUndefined();
+    expect(hit.headers['x-newrelic-transaction']).toBeUndefined();
+    expect(hit.headers['sentry-trace']).toBeUndefined();
+    expect(hit.headers['x-trace-id']).toBe('application-trace-id');
+    expect(hit.headers['x-request-id']).toBe('application-request-id');
+    expect(hit.headers.authorization).toBe('Bearer application-token');
   });
 
   describe('redirect handling', () => {

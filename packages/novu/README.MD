@@ -16,7 +16,7 @@ The Novu CLI connects AI agents to real communication channels — Slack, Email,
 
 Describe what your agent should do, pick a channel, and Novu provisions credentials, identity, and delivery so your agent can message users where they already are.
 
-Learn more in the [managed agent quickstart](https://docs.novu.co/agents/managed-agent/quickstart).
+Learn more in the [managed agent quickstart](https://docs.novu.co/agents/get-started/claude-managed).
 
 ## Quickstart
 
@@ -62,7 +62,7 @@ The CLI authenticates your Novu account, creates a bridge agent, writes `NOVU_SE
 | **Slack** | Creates the Slack app, stores OAuth credentials, opens the install flow |
 | **Email** | Provisions a unique inbound address (e.g. `my-agent@agentconnect.sh`) |
 | **Telegram** | Links your @BotFather bot token |
-| **WhatsApp** | Hands off to the Novu dashboard to finish provider setup |
+| **WhatsApp** | Prints a Meta Embedded Signup link you complete in the browser (falls back to the dashboard when Embedded Signup is unavailable) |
 | **Microsoft Teams** | Hands off to the Novu dashboard to finish provider setup |
 
 One `connect` run creates one agent and connects one channel. Run it again to add more channels (each run creates a new agent unless you pick an existing one).
@@ -75,7 +75,7 @@ One `connect` run creates one agent and connects one channel. Run it again to ad
 | **Keyless** | Try Novu without signing up | Pass `--keyless` |
 | **Secret key** | CI or existing automation | Pass `--secret-key` or set `NOVU_SECRET_KEY` |
 
-WhatsApp and Microsoft Teams require dashboard OAuth — they are not supported with `--keyless` in non-interactive mode.
+Microsoft Teams requires dashboard OAuth — it is not supported with `--keyless` in non-interactive mode. WhatsApp works in both modes, keyless included.
 
 ## CLI commands
 
@@ -230,7 +230,7 @@ npx novu@latest dev --port 3002 --dashboard-url https://eu.dashboard.novu.co
 
 ## Links
 
-- [Managed agent docs](https://docs.novu.co/agents/managed-agent/quickstart)
+- [Managed agent docs](https://docs.novu.co/agents/get-started/claude-managed)
 - [Agent onboarding guide for AI assistants](../shared/docs/agent-onboarding.md)
 - [Novu documentation](https://docs.novu.co)
 - [Discord community](https://discord.novu.co)

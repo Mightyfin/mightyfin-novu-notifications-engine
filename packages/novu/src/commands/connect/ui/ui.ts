@@ -3,9 +3,12 @@ import type { BridgeScaffoldVariant } from '../pipeline/bridge/types';
 import type { BridgeAdapterVariant } from '../pipeline/bridge-adapter/types';
 import type { LlmAuthKind } from '../pipeline/llm-auth/types';
 import type {
+  WebChatConnectOutcome,
+  WebChatSetupMode,
   AgentConnectMode,
   AgentSummary,
   AiSdkConnectOutcome,
+  BridgeProjectKind,
   BridgeRequirement,
   ChannelChoice,
   ChatSdkConnectOutcome,
@@ -88,7 +91,12 @@ export interface ConnectUI {
   promptForAgentName(defaultName: string): Promise<string>;
   confirmEnvSecretOverwrite(opts: { envPath: string; existingMasked: string; nextMasked: string }): Promise<boolean>;
   pickLlmAuthKind(opts: { connectMode: BridgeAdapterVariant }): Promise<LlmAuthKind>;
-  confirmScaffold(opts: { projectDir: string; appName: string; variant?: BridgeScaffoldVariant }): Promise<boolean>;
+  confirmScaffold(opts: {
+    projectDir: string;
+    appName: string;
+    variant?: BridgeScaffoldVariant;
+    llmAuthLabel?: string;
+  }): Promise<boolean>;
   scaffoldingBridge(opts: { variant: BridgeScaffoldVariant }): void;
   bridgeScaffolded(opts: {
     variant: BridgeScaffoldVariant;
@@ -225,6 +233,24 @@ export interface ConnectUI {
   showSendblueTestWaiting(opts: { phone: string; fromNumber: string; imessageUrl: string }): void;
   sendblueConnected(): void;
 
+  // WhatsApp path (Meta Embedded Signup via the dashboard signup page)
+  addingWhatsAppIntegration(): void;
+  /**
+   * Consent gate before opening the dashboard Embedded Signup page. Resolves
+   * when the user hits Enter — the pipeline then runs `open(signupUrl)`.
+   * Non-interactive mode logs a machine-readable URL and resolves immediately.
+   */
+  awaitWhatsAppSignupOpen(opts: { signupUrl: string }): Promise<void>;
+  /** Transitions to the stage-1 polling view (waiting for Embedded Signup to save credentials). */
+  showWhatsAppSignupWaiting(opts: { signupUrl: string }): void;
+  /**
+   * Stage 2: prompt the user to message their business number on WhatsApp
+   * (wa.me deep link when the display phone number is known). The pipeline
+   * polls the agent-integration link for `connectedAt`.
+   */
+  showWhatsAppTest(opts: { waMeUrl?: string; waMeQr?: string; displayPhoneNumber?: string }): void;
+  whatsappConnected(): void;
+
   // Slack path
   addingSlackIntegration(): void;
   /**
@@ -254,6 +280,12 @@ export interface ConnectUI {
   slackConnected(): void;
   slackSkipped(): void;
 
+  // Web Chat path
+  addingWebChatIntegration(): void;
+  awaitWebChatHandoff(opts: { dashboardUrl: string; embedPrompt: string; embedPromptFile?: string }): Promise<void>;
+  pickWebChatSetup(opts: { projectKind: BridgeProjectKind }): Promise<WebChatSetupMode>;
+  scaffoldingWebChat(): void;
+
   // Welcome message
   sendingWelcome(): void;
 
@@ -272,6 +304,8 @@ export interface ConnectUI {
     aiSdkOutcome?: AiSdkConnectOutcome;
     langChainOutcome?: LangChainConnectOutcome;
     customCodeOutcome?: CustomCodeConnectOutcome;
+    webChatOutcome?: WebChatConnectOutcome;
+    webChatHandoff?: { dashboardUrl: string; embedPrompt?: string; embedPromptFile?: string };
   }): void;
   failure(message: string): void;
 

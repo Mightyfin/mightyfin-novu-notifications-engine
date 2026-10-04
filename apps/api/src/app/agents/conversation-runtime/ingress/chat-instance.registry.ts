@@ -1,6 +1,22 @@
-import { BadRequestException, Injectable, OnModuleDestroy } from '@nestjs/common';
+import type { SlackAdapter } from '@chat-adapter/slack';
+import type { TeamsAdapter } from '@chat-adapter/teams';
+import type { TelegramAdapter } from '@chat-adapter/telegram';
+import type { WhatsAppAdapter } from '@chat-adapter/whatsapp';
+import { BadRequestException, forwardRef, Inject, Injectable, OnModuleDestroy } from '@nestjs/common';
 import { CacheService, PinoLogger } from '@novu/application-generic';
-import type { Chat, Message, ReactionEvent, SlashCommandEvent, Thread } from 'chat';
+import type { NovuWebChatAdapter } from '@novu/chat-adapter-web-chat';
+import { stripAgentReplyToken } from '@novu/shared';
+import { retryPolicies } from '@slack/web-api';
+import type {
+  Adapter,
+  Chat,
+  Message,
+  MessageContext,
+  MessageDeletedEvent,
+  ReactionEvent,
+  SlashCommandEvent,
+  Thread,
+} from 'chat';
 import { LRUCache } from 'lru-cache';
 import { resolveWhatsAppAppSecret } from '../../../integrations/usecases/whatsapp/whatsapp-credentials.utils';
 import { AgentConfigResolver, ResolvedAgentConfig } from '../../channels/agent-config-resolver.service';
@@ -9,19 +25,94 @@ import { AgentEmailSender, resolveAgentEmailSenderName } from '../../email/agent
 import { AgentPlatformEnum } from '../../shared/enums/agent-platform.enum';
 import { captureAgentException, captureAgentWarning } from '../../shared/errors/capture-agent-sentry';
 import { esmImport } from '../../shared/util/esm-import';
+import { WebChatAcceptIdempotencyService } from '../../web-chat/web-chat-accept-idempotency.service';
+import {
+  type WebChatPlatformDeliveryContext,
+  WebChatPlatformDeliveryService,
+} from '../../web-chat/web-chat-platform-delivery.service';
+import { WebChatResumeAuthorizationService } from '../../web-chat/web-chat-resume-authorization.service';
+import { WebChatSessionVerifier } from '../../web-chat/web-chat-session.verifier';
 import { AgentActionTokenService } from '../action-token/agent-action-token.service';
 import type { InboundReactionEvent } from './inbound-turn.handler';
+import { PlanLimitGateService } from './plan-limit-gate.service';
+import { rehydrateInboundAttachments } from './rehydrate-inbound-attachments';
+
+/**
+ * The adapters this registry knows how to build, keyed by `AgentPlatformEnum`
+ * value. Declaring the full map is what lets `chat.getAdapter('slack')` resolve
+ * to the concrete adapter type rather than the base `Adapter` interface, so
+ * platform-specific members are visible without casting.
+ *
+ * A given instance only ever holds one adapter (see `buildAdapters`), so callers
+ * must still guard on `config.platform` before reaching for a platform's adapter
+ * — exactly as they do today. Email and Sendblue expose no members beyond the
+ * base interface, so they stay as `Adapter`.
+ *
+ * Written as a type alias rather than an interface because `Chat`'s parameter is
+ * constrained to `Record<string, Adapter>`, which interfaces do not satisfy.
+ */
+export type PlatformAdapters = {
+  slack: SlackAdapter;
+  teams: TeamsAdapter;
+  telegram: TelegramAdapter;
+  whatsapp: WhatsAppAdapter;
+  web_chat: NovuWebChatAdapter;
+  email: Adapter;
+  sendblue: Adapter;
+  /**
+   * Keyed `imessage`, NOT `photon_imessage`: the Chat SDK resolves adapters by
+   * thread-id prefix, and the Photon vendor adapter encodes threads as
+   * `imessage:{chatGuid}` — a mismatched key breaks every thread-addressed
+   * send (e.g. the agent reply endpoint) while inbound-context replies still
+   * work, which is exactly the silent way it fails.
+   */
+  imessage: Adapter;
+};
+
+export type ChatWithAdapters = Chat<PlatformAdapters>;
+
+/**
+ * Adapter map key for a platform. Usually the enum value itself — except
+ * Photon, whose vendor adapter encodes thread ids with the `imessage:` prefix
+ * the Chat SDK resolves adapters by, so its map key is `imessage`.
+ */
+export function platformAdapterKey(platform: AgentPlatformEnum): keyof PlatformAdapters {
+  return platform === AgentPlatformEnum.PHOTON_IMESSAGE ? 'imessage' : (platform as keyof PlatformAdapters);
+}
+
+interface ChatStateLogger {
+  debug: (msg: string, ctx?: Record<string, unknown>) => void;
+  info: (msg: string, ctx?: Record<string, unknown>) => void;
+  warn: (msg: string, ctx?: Record<string, unknown>) => void;
+  error: (msg: string, ctx?: Record<string, unknown>) => void;
+  child: (prefix?: unknown) => ChatStateLogger;
+}
 
 export interface InboundCallbacks {
-  onMessage: (agentId: string, config: ResolvedAgentConfig, thread: Thread, message: Message) => Promise<void>;
+  onMessage: (
+    agentId: string,
+    config: ResolvedAgentConfig,
+    thread: Thread,
+    message: Message,
+    context?: MessageContext
+  ) => Promise<void>;
   onAction: (
     agentId: string,
     config: ResolvedAgentConfig,
     thread: Thread,
     action: import('@novu/framework').AgentAction,
-    userId: string
+    userId: string,
+    rawEvent: unknown
   ) => Promise<void>;
   onReaction: (agentId: string, config: ResolvedAgentConfig, event: InboundReactionEvent) => Promise<void>;
+  onMessageUpdated: (
+    agentId: string,
+    config: ResolvedAgentConfig,
+    thread: Thread,
+    message: Message,
+    previousMessage?: Message
+  ) => Promise<void>;
+  onMessageDeleted: (agentId: string, config: ResolvedAgentConfig, event: MessageDeletedEvent) => Promise<void>;
 }
 
 /**
@@ -37,7 +128,7 @@ export interface InboundCallbacks {
  * the cached instance is dropped and rebuilt — see getOrCreate().
  */
 export interface CachedChat {
-  chat: Chat;
+  chat: ChatWithAdapters | null;
   config: ResolvedAgentConfig;
   adapterFingerprint: string;
 }
@@ -63,7 +154,7 @@ const INSTANCE_TTL_MS = 1000 * 60 * 30;
 @Injectable()
 export class ChatInstanceRegistry implements OnModuleDestroy {
   readonly instances: LRUCache<string, CachedChat>;
-  private readonly pendingCreations = new Map<string, Promise<Chat>>();
+  private readonly pendingCreations = new Map<string, Promise<ChatWithAdapters>>();
   private inboundCallbacks: InboundCallbacks | null = null;
 
   constructor(
@@ -72,14 +163,20 @@ export class ChatInstanceRegistry implements OnModuleDestroy {
     private readonly agentConfigResolver: AgentConfigResolver,
     private readonly emailActionTokenService: AgentEmailActionTokenService,
     private readonly agentActionTokenService: AgentActionTokenService,
-    private readonly agentEmailSender: AgentEmailSender
+    private readonly agentEmailSender: AgentEmailSender,
+    private readonly webChatSessionVerifier: WebChatSessionVerifier,
+    private readonly webChatPlatformDelivery: WebChatPlatformDeliveryService,
+    private readonly webChatResumeAuthorization: WebChatResumeAuthorizationService,
+    private readonly webChatAcceptIdempotency: WebChatAcceptIdempotencyService,
+    @Inject(forwardRef(() => PlanLimitGateService))
+    private readonly planLimitGate: PlanLimitGateService
   ) {
     this.logger.setContext(this.constructor.name);
     this.instances = new LRUCache<string, CachedChat>({
       max: MAX_CACHED_INSTANCES,
       ttl: INSTANCE_TTL_MS,
       dispose: (cached, key) => {
-        cached.chat.shutdown().catch((err) => {
+        cached.chat?.shutdown().catch((err) => {
           this.logger.error(err, `Failed to shut down evicted Chat instance ${key}`);
           captureAgentException(err, {
             component: 'chat-instance-registry',
@@ -100,17 +197,17 @@ export class ChatInstanceRegistry implements OnModuleDestroy {
     agentId: string,
     platform: AgentPlatformEnum,
     config: ResolvedAgentConfig
-  ): Promise<Chat> {
+  ): Promise<ChatWithAdapters> {
     const freshFingerprint = this.adapterFingerprint(config);
     const existing = this.instances.get(instanceKey);
 
+    if (existing?.adapterFingerprint === freshFingerprint && existing.chat) {
+      existing.config = config;
+
+      return existing.chat;
+    }
+
     if (existing) {
-      if (existing.adapterFingerprint === freshFingerprint) {
-        existing.config = config;
-
-        return existing.chat;
-      }
-
       this.instances.delete(instanceKey);
     }
 
@@ -131,7 +228,7 @@ export class ChatInstanceRegistry implements OnModuleDestroy {
   async onModuleDestroy() {
     const shutdowns = [...this.instances.entries()].map(async ([key, cached]) => {
       try {
-        await cached.chat.shutdown();
+        await cached.chat?.shutdown();
       } catch (err) {
         this.logger.error(err, `Failed to shut down Chat instance ${key}`);
         captureAgentException(err, {
@@ -152,14 +249,77 @@ export class ChatInstanceRegistry implements OnModuleDestroy {
     platform: AgentPlatformEnum,
     config: ResolvedAgentConfig,
     adapterFingerprint: string
-  ): Promise<Chat> {
-    const chat = await this.createChatInstance(instanceKey, agentId, platform, config);
+  ): Promise<ChatWithAdapters> {
+    const cached: CachedChat = {
+      chat: null,
+      config,
+      adapterFingerprint,
+    };
+    const chat = await this.createChatInstance(instanceKey, agentId, platform, cached);
     await chat.initialize();
-    const cached: CachedChat = { chat, config, adapterFingerprint };
+    cached.chat = chat;
     this.registerEventHandlers(agentId, cached);
     this.instances.set(instanceKey, cached);
 
     return chat;
+  }
+
+  private async buildSendblueAdapter(config: ResolvedAgentConfig): Promise<Record<string, unknown>> {
+    const { credentials } = config;
+
+    if (!credentials.apiKey || !credentials.secretKey || !credentials.from) {
+      throw new BadRequestException(
+        'Sendblue agent integration requires API Key, Secret Key, and From Number credentials'
+      );
+    }
+
+    if (!credentials.token) {
+      throw new BadRequestException(
+        'Sendblue agent integration requires a webhook secret. ' +
+          'Run the "Configure webhook" step to provision the receive webhook before this integration can receive messages.'
+      );
+    }
+
+    const { createSendblueAdapter } = await esmImport('@novu/chat-adapter-sendblue');
+
+    return {
+      // The underlying official Sendblue SDK reads `SENDBLUE_API_BASE_URL`
+      // itself; e2e tests point it at an in-process stub (see sendblue-api-stub.ts).
+      sendblue: createSendblueAdapter({
+        apiKey: credentials.apiKey,
+        secretKey: credentials.secretKey,
+        fromNumber: credentials.from,
+        webhookSecret: credentials.token,
+        userName: config.agentName,
+      }),
+    };
+  }
+
+  private async buildPhotonImessageAdapter(config: ResolvedAgentConfig): Promise<Record<string, unknown>> {
+    const { credentials } = config;
+
+    if (!credentials.apiKey || !credentials.secretKey) {
+      throw new BadRequestException('Photon agent integration requires Project ID and Project Secret credentials');
+    }
+
+    if (!credentials.token) {
+      throw new BadRequestException(
+        'Photon agent integration requires a webhook signing secret. ' +
+          'Run the "Configure webhook" step to register the webhook before this integration can receive messages.'
+      );
+    }
+
+    const { createPhotonImessageAdapter } = await esmImport('@novu/chat-adapter-photon-imessage');
+
+    return {
+      // Key must match the vendor thread-id prefix (`imessage:`) — see PlatformAdapters.
+      imessage: createPhotonImessageAdapter({
+        projectId: credentials.apiKey,
+        projectSecret: credentials.secretKey,
+        webhookSecret: credentials.token,
+        userName: config.agentName,
+      }),
+    };
   }
 
   private adapterFingerprint(config: ResolvedAgentConfig): string {
@@ -192,14 +352,14 @@ export class ChatInstanceRegistry implements OnModuleDestroy {
     instanceKey: string,
     agentId: string,
     platform: AgentPlatformEnum,
-    config: ResolvedAgentConfig
-  ): Promise<Chat> {
+    cached: CachedChat
+  ): Promise<ChatWithAdapters> {
     const [{ Chat: ChatCtor }, { createIoRedisState }] = await Promise.all([
       esmImport('chat'),
       esmImport('@chat-adapter/state-ioredis'),
     ]);
 
-    const adapters = await this.buildAdapters(agentId, platform, config);
+    const adapters = await this.buildAdapters(agentId, platform, cached);
     const client = this.cacheService.client;
     if (!client) {
       throw new Error('Cache in-memory provider client is not available for Conversational SDK state adapter');
@@ -213,16 +373,39 @@ export class ChatInstanceRegistry implements OnModuleDestroy {
         keyPrefix: `novu:agent:${instanceKey}`,
         logger: this.chatStateLogger(),
       }),
-      logger: 'silent',
+      logger: this.chatStateLogger(),
+      concurrency: this.resolveConcurrency(platform),
     });
   }
 
-  private chatStateLogger() {
+  /**
+   * Burst folds a flurry of overlapping webhook messages into one turn, which is
+   * what messaging platforms (Slack/Teams/Telegram/WhatsApp/email) need. Web Chat's
+   * accept contract is different: `createConversation` awaits `chat.processMessage`
+   * synchronously before returning 201 with `messageId` (see
+   * `@novu/chat-adapter-web-chat`'s `handleMessageIngress`), so burst's built-in
+   * debounce wait — which applies even to a lone message on an idle thread — would
+   * add latency to every Web Chat send and can outlive the accept-claim TTL. Web
+   * Chat also never has genuinely overlapping inbound messages (one HTTP request
+   * per send), so it has nothing to fold. Keep it on the SDK default (`drop`).
+   */
+  private resolveConcurrency(platform: AgentPlatformEnum): { strategy: 'burst' } | undefined {
+    return platform === AgentPlatformEnum.WEB_CHAT ? undefined : { strategy: 'burst' };
+  }
+
+  // The Chat SDK's getLogger(prefix) returns this.logger.child(prefix) when a
+  // prefix is supplied (see chat's getLogger). Platform adapters (e.g. Sendblue)
+  // request a prefixed logger during initialize, so the object we hand to the
+  // SDK must expose a pino-style child() that yields the same shape - otherwise
+  // adapter init throws "this.logger.child is not a function".
+  private chatStateLogger(bindings?: Record<string, unknown>): ChatStateLogger {
+    const mergeCtx = (ctx?: Record<string, unknown>) => (bindings ? { ...bindings, ...(ctx ?? {}) } : (ctx ?? {}));
+
     return {
-      debug: (msg: string, ctx?: Record<string, unknown>) => this.logger.debug(ctx ?? {}, msg),
-      info: (msg: string, ctx?: Record<string, unknown>) => this.logger.info(ctx ?? {}, msg),
+      debug: (msg: string, ctx?: Record<string, unknown>) => this.logger.debug(mergeCtx(ctx), msg),
+      info: (msg: string, ctx?: Record<string, unknown>) => this.logger.info(mergeCtx(ctx), msg),
       warn: (msg: string, ctx?: Record<string, unknown>) => {
-        this.logger.warn(ctx ?? {}, msg);
+        this.logger.warn(mergeCtx(ctx), msg);
         if (ctx?.err) {
           captureAgentWarning(ctx.err, {
             component: 'chat-instance-registry',
@@ -232,7 +415,7 @@ export class ChatInstanceRegistry implements OnModuleDestroy {
         }
       },
       error: (msg: string, ctx?: Record<string, unknown>) => {
-        this.logger.error(ctx ?? {}, msg);
+        this.logger.error(mergeCtx(ctx), msg);
         if (ctx?.err) {
           captureAgentException(ctx.err, {
             component: 'chat-instance-registry',
@@ -241,39 +424,25 @@ export class ChatInstanceRegistry implements OnModuleDestroy {
           });
         }
       },
+      child: (prefix?: unknown) => {
+        const extra = prefix && typeof prefix === 'object' ? (prefix as Record<string, unknown>) : {};
+
+        return this.chatStateLogger({ ...(bindings ?? {}), ...extra });
+      },
     };
   }
 
   private async buildAdapters(
     agentId: string,
     platform: AgentPlatformEnum,
-    config: ResolvedAgentConfig
+    cached: CachedChat
   ): Promise<Record<string, unknown>> {
-    const { credentials, connectionAccessToken } = config;
+    const config = cached.config;
+    const { credentials } = config;
 
     switch (platform) {
-      case AgentPlatformEnum.SLACK: {
-        if (!credentials.signingSecret) {
-          throw new BadRequestException(
-            'Slack agent integration requires a signing secret. Complete Slack app setup for this integration.'
-          );
-        }
-
-        if (!connectionAccessToken) {
-          throw new BadRequestException(
-            'Slack agent integration requires a workspace bot token. Install the app to your Slack workspace via OAuth in the agent setup guide.'
-          );
-        }
-
-        const { createSlackAdapter } = await esmImport('@chat-adapter/slack');
-
-        return {
-          slack: createSlackAdapter({
-            botToken: connectionAccessToken,
-            signingSecret: credentials.signingSecret,
-          }),
-        };
-      }
+      case AgentPlatformEnum.SLACK:
+        return this.buildSlackAdapter(config);
       case AgentPlatformEnum.TEAMS: {
         if (!credentials.clientId || !credentials.secretKey || !credentials.tenantId) {
           throw new BadRequestException(
@@ -294,12 +463,7 @@ export class ChatInstanceRegistry implements OnModuleDestroy {
       case AgentPlatformEnum.WHATSAPP: {
         const appSecret = resolveWhatsAppAppSecret(credentials);
 
-        if (
-          !credentials.apiToken ||
-          !appSecret ||
-          !credentials.token ||
-          !credentials.phoneNumberIdentification
-        ) {
+        if (!credentials.apiToken || !appSecret || !credentials.token || !credentials.phoneNumberIdentification) {
           throw new BadRequestException(
             'WhatsApp agent integration requires accessToken, appSecret, verifyToken, and phoneNumberId credentials'
           );
@@ -334,34 +498,10 @@ export class ChatInstanceRegistry implements OnModuleDestroy {
           }),
         };
       }
-      case AgentPlatformEnum.SENDBLUE: {
-        if (!credentials.apiKey || !credentials.secretKey || !credentials.from) {
-          throw new BadRequestException(
-            'Sendblue agent integration requires API Key, Secret Key, and From Number credentials'
-          );
-        }
-
-        if (!credentials.token) {
-          throw new BadRequestException(
-            'Sendblue agent integration requires a webhook secret. ' +
-              'Run the "Configure webhook" step to provision the receive webhook before this integration can receive messages.'
-          );
-        }
-
-        const { createSendblueAdapter } = await esmImport('@novu/chat-adapter-sendblue');
-
-        return {
-          // The underlying official Sendblue SDK reads `SENDBLUE_API_BASE_URL`
-          // itself; e2e tests point it at an in-process stub (see sendblue-api-stub.ts).
-          sendblue: createSendblueAdapter({
-            apiKey: credentials.apiKey,
-            secretKey: credentials.secretKey,
-            fromNumber: credentials.from,
-            webhookSecret: credentials.token,
-            userName: config.agentName,
-          }),
-        };
-      }
+      case AgentPlatformEnum.SENDBLUE:
+        return this.buildSendblueAdapter(config);
+      case AgentPlatformEnum.PHOTON_IMESSAGE:
+        return this.buildPhotonImessageAdapter(config);
       case AgentPlatformEnum.EMAIL: {
         const { outboundIntegrationId } = credentials;
 
@@ -376,6 +516,7 @@ export class ChatInstanceRegistry implements OnModuleDestroy {
             senderName: resolveAgentEmailSenderName(config),
             signingSecret: credentials.secretKey,
             sendEmail: this.agentEmailSender.buildSendEmailCallback(config, outboundIntegrationId),
+            stripAgentReplyToken,
             actionUrlBuilder: async ({ threadId, messageId, actionId, value, label, style }) => {
               const userIdentifier = extractRecipientFromThreadId(threadId);
               const { url } = await this.emailActionTokenService.signActionToken({
@@ -399,9 +540,98 @@ export class ChatInstanceRegistry implements OnModuleDestroy {
           }),
         };
       }
+      case AgentPlatformEnum.WEB_CHAT: {
+        const { createWebChatAdapter } = await esmImport('@novu/chat-adapter-web-chat');
+        const deliveryContext: WebChatPlatformDeliveryContext = {
+          agentId,
+          get config() {
+            return cached.config;
+          },
+        };
+
+        return {
+          web_chat: createWebChatAdapter({
+            userName: config.agentName,
+            verifySession: (request) => this.webChatSessionVerifier.verifySession(request),
+            authorizeResume: ({ conversationId, session }) =>
+              this.webChatResumeAuthorization.canResume({ conversationId, session, agentId }),
+            checkAcceptLimits: ({ isNewThread, conversationId }) =>
+              this.planLimitGate.checkWebChatAcceptLimits(agentId, cached.config, { isNewThread, conversationId }),
+            claimInbound: ({ session, key, conversationId }) =>
+              this.webChatAcceptIdempotency.claimInbound(session.environmentId, key, conversationId),
+            releaseInbound: ({ session, key, conversationId, claimToken }) =>
+              this.webChatAcceptIdempotency.releaseInbound(session.environmentId, key, conversationId, claimToken),
+            completeInbound: ({ session, key, conversationId, claimToken, messageId }) =>
+              this.webChatAcceptIdempotency.completeInbound(
+                session.environmentId,
+                key,
+                conversationId,
+                claimToken,
+                messageId
+              ),
+            deliverMessage: this.webChatPlatformDelivery.createDeliverMessage(deliveryContext),
+            editMessage: this.webChatPlatformDelivery.createEditMessage(deliveryContext),
+            deleteMessage: this.webChatPlatformDelivery.createDeleteMessage(deliveryContext),
+            startTyping: this.webChatPlatformDelivery.createStartTyping(deliveryContext),
+          }),
+        };
+      }
       default:
         throw new BadRequestException(`Unsupported platform: ${platform}`);
     }
+  }
+
+  /**
+   * Multi-workspace mode: a single Novu-hosted Slack app can be installed across many
+   * customer workspaces (the NovuCopilot distribution model), so the bot token must be
+   * resolved per workspace at event time rather than baked into the adapter. The adapter
+   * calls `getInstallation(team_id)` while processing each inbound webhook and binds the
+   * resolved token for the duration of that request (so `users.info` and any in-request
+   * reply use the right workspace token). Outbound calls made in a separate request bind
+   * their token explicitly via `OutboundGateway`.
+   *
+   * `connectionAccessToken` (the first installed workspace's token) is still required
+   * as a fast-fail guard that at least one workspace is installed, and it keys the adapter
+   * fingerprint so a rebuild happens when installations change.
+   */
+  private async buildSlackAdapter(config: ResolvedAgentConfig): Promise<Record<string, unknown>> {
+    const { credentials, connectionAccessToken } = config;
+
+    if (!credentials.signingSecret) {
+      throw new BadRequestException(
+        'Slack agent integration requires a signing secret. Complete Slack app setup for this integration.'
+      );
+    }
+
+    if (!connectionAccessToken) {
+      throw new BadRequestException(
+        'Slack agent integration requires a workspace bot token. Install the app to your Slack workspace via OAuth in the agent setup guide.'
+      );
+    }
+
+    const { createSlackAdapter } = await esmImport('@chat-adapter/slack');
+
+    return {
+      slack: createSlackAdapter({
+        signingSecret: credentials.signingSecret,
+        webClientOptions: {
+          retryConfig: retryPolicies.fiveRetriesInFiveMinutes,
+          timeout: 15_000,
+        },
+        installationProvider: {
+          getInstallation: async (installationId: string) => {
+            const installation = await this.agentConfigResolver.resolveSlackInstallation(
+              config.environmentId,
+              config.organizationId,
+              config.integrationIdentifier,
+              installationId
+            );
+
+            return installation ? { botToken: installation.token, botUserId: installation.botUserId } : null;
+          },
+        },
+      }),
+    };
   }
 
   private registerEventHandlers(agentId: string, cached: CachedChat) {
@@ -412,31 +642,80 @@ export class ChatInstanceRegistry implements OnModuleDestroy {
     }
 
     const callbacks = this.inboundCallbacks;
+    const chat = cached.chat;
+    if (!chat) {
+      return;
+    }
 
-    cached.chat.onNewMention(async (thread: Thread, message: Message) => {
+    chat.onNewMention(async (thread: Thread, message: Message, context?: MessageContext) => {
       try {
-        await thread.subscribe();
-        await callbacks.onMessage(agentId, cached.config, thread, message);
+        // Shared rooms stay unsubscribed until the mention gate in the inbound
+        // handler decides this agent should follow the thread.
+        if (thread.isDM) {
+          await thread.subscribe();
+        }
+        this.rehydrateBurstAttachments(cached, message, context);
+        await callbacks.onMessage(agentId, cached.config, thread, message, context);
       } catch (err) {
-        this.logger.error(err, `[agent:${agentId}] Error handling new mention`);
-        captureAgentException(err, { component: 'chat-instance-registry', operation: 'on-new-mention', agentId });
-      }
-    });
-
-    cached.chat.onSubscribedMessage(async (thread: Thread, message: Message) => {
-      try {
-        await callbacks.onMessage(agentId, cached.config, thread, message);
-      } catch (err) {
-        this.logger.error(err, `[agent:${agentId}] Error handling subscribed message`);
-        captureAgentException(err, {
-          component: 'chat-instance-registry',
-          operation: 'on-subscribed-message',
+        this.rethrowWebChatInboundError(cached, err, {
           agentId,
+          operation: 'on-new-mention',
+          logMessage: `[agent:${agentId}] Error handling new mention`,
         });
       }
     });
 
-    cached.chat.onSlashCommand(async (event: SlashCommandEvent) => {
+    chat.onSubscribedMessage(async (thread: Thread, message: Message, context?: MessageContext) => {
+      try {
+        this.rehydrateBurstAttachments(cached, message, context);
+        await callbacks.onMessage(agentId, cached.config, thread, message, context);
+      } catch (err) {
+        this.rethrowWebChatInboundError(cached, err, {
+          agentId,
+          operation: 'on-subscribed-message',
+          logMessage: `[agent:${agentId}] Error handling subscribed message`,
+        });
+      }
+    });
+
+    chat.onMessageUpdated(async (thread: Thread, message: Message, previousMessage?: Message) => {
+      try {
+        const adapter = cached.chat?.getAdapter(platformAdapterKey(cached.config.platform));
+        if (adapter) {
+          rehydrateInboundAttachments(adapter, message);
+          if (previousMessage) {
+            rehydrateInboundAttachments(adapter, previousMessage);
+          }
+        }
+        await callbacks.onMessageUpdated(agentId, cached.config, thread, message, previousMessage);
+      } catch (err) {
+        this.rethrowWebChatInboundError(cached, err, {
+          agentId,
+          operation: 'on-message-updated',
+          logMessage: `[agent:${agentId}] Error handling message update`,
+        });
+      }
+    });
+
+    chat.onMessageDeleted(async (event: MessageDeletedEvent) => {
+      try {
+        if (event.previousMessage) {
+          const adapter = cached.chat?.getAdapter(platformAdapterKey(cached.config.platform));
+          if (adapter) {
+            rehydrateInboundAttachments(adapter, event.previousMessage);
+          }
+        }
+        await callbacks.onMessageDeleted(agentId, cached.config, event);
+      } catch (err) {
+        this.rethrowWebChatInboundError(cached, err, {
+          agentId,
+          operation: 'on-message-deleted',
+          logMessage: `[agent:${agentId}] Error handling message delete`,
+        });
+      }
+    });
+
+    chat.onSlashCommand(async (event: SlashCommandEvent) => {
       try {
         await this.redispatchTelegramCommandAsMessage(cached, event);
       } catch (err) {
@@ -450,7 +729,7 @@ export class ChatInstanceRegistry implements OnModuleDestroy {
       }
     });
 
-    cached.chat.onAction(async (event) => {
+    chat.onAction(async (event) => {
       try {
         if (!event.thread) {
           this.logger.warn(`[agent:${agentId}] Action received without thread context, skipping`);
@@ -478,21 +757,25 @@ export class ChatInstanceRegistry implements OnModuleDestroy {
             value: resolvedAction.value,
             sourceMessageId: event.messageId,
           },
-          event.user.userId
+          event.user.userId,
+          event.raw
         );
       } catch (err) {
-        this.logger.error(err, `[agent:${agentId}] Error handling action ${event.actionId}`);
-        captureAgentException(err, {
-          component: 'chat-instance-registry',
-          operation: 'on-action',
+        this.rethrowWebChatInboundError(cached, err, {
           agentId,
+          operation: 'on-action',
+          logMessage: `[agent:${agentId}] Error handling action ${event.actionId}`,
           extra: { actionId: event.actionId },
         });
       }
     });
 
-    cached.chat.onReaction(async (event: ReactionEvent) => {
+    chat.onReaction(async (event: ReactionEvent) => {
       try {
+        if (event.message) {
+          rehydrateInboundAttachments(chat.getAdapter(platformAdapterKey(cached.config.platform)), event.message);
+        }
+
         await callbacks.onReaction(agentId, cached.config, {
           emoji: event.emoji,
           added: event.added,
@@ -500,12 +783,47 @@ export class ChatInstanceRegistry implements OnModuleDestroy {
           message: event.message,
           thread: event.thread as Thread | undefined,
           user: event.user,
+          raw: event.raw,
         });
       } catch (err) {
         this.logger.error(err, `[agent:${agentId}] Error handling reaction`);
         captureAgentException(err, { component: 'chat-instance-registry', operation: 'on-reaction', agentId });
       }
     });
+  }
+
+  private rehydrateBurstAttachments(cached: CachedChat, message: Message, context?: MessageContext): void {
+    const adapter = cached.chat?.getAdapter(platformAdapterKey(cached.config.platform));
+    if (!adapter) {
+      return;
+    }
+    rehydrateInboundAttachments(adapter, message);
+    for (const skipped of context?.skipped ?? []) {
+      rehydrateInboundAttachments(adapter, skipped);
+    }
+  }
+
+  /**
+   * Slack/Telegram keep swallowing inbound errors so their webhooks stay 200.
+   * Web chat must rethrow so the adapter releases the accept lock instead of
+   * writing a 24h success cache for a failed turn.
+   */
+  private rethrowWebChatInboundError(
+    cached: CachedChat,
+    err: unknown,
+    args: { agentId: string; operation: string; logMessage: string; extra?: Record<string, unknown> }
+  ): void {
+    this.logger.error(err, args.logMessage);
+    captureAgentException(err, {
+      component: 'chat-instance-registry',
+      operation: args.operation,
+      agentId: args.agentId,
+      extra: args.extra,
+    });
+
+    if (cached.config.platform === AgentPlatformEnum.WEB_CHAT) {
+      throw err;
+    }
   }
 
   /**
@@ -520,7 +838,7 @@ export class ChatInstanceRegistry implements OnModuleDestroy {
    * including dedupe, thread locking, and DM/mention routing.
    */
   private async redispatchTelegramCommandAsMessage(cached: CachedChat, event: SlashCommandEvent): Promise<void> {
-    if (cached.config.platform !== AgentPlatformEnum.TELEGRAM) {
+    if (cached.config.platform !== AgentPlatformEnum.TELEGRAM || !cached.chat) {
       return;
     }
 

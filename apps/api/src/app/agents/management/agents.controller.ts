@@ -4,6 +4,7 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
   HttpCode,
   HttpStatus,
   Param,
@@ -16,9 +17,16 @@ import {
 } from '@nestjs/common';
 import { ApiExcludeEndpoint, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePermissions } from '@novu/application-generic';
-import { ApiRateLimitCategoryEnum, DirectionEnum, PermissionsEnum, UserSessionData } from '@novu/shared';
+import {
+  ApiRateLimitCategoryEnum,
+  DirectionEnum,
+  isAgentAnalyticsSource,
+  NOVU_ANALYTICS_SOURCE_HEADER,
+  PermissionsEnum,
+  UserSessionData,
+} from '@novu/shared';
 import { RequireAuthentication } from '../../auth/framework/auth.decorator';
-import { ExternalApiAccessible } from '../../auth/framework/external-api.decorator';
+import { ExternalApiAccessible, OAuthAccessible } from '../../auth/framework/external-api.decorator';
 import { ThrottlerCategory } from '../../rate-limiting/guards';
 import {
   ApiCommonResponses,
@@ -35,6 +43,7 @@ import {
   AgentResponseDto,
   ConversationUsageResponseDto,
   CreateAgentRequestDto,
+  GetAgentUsageResponseDto,
   ListAgentsQueryDto,
   ListAgentsResponseDto,
   UpdateAgentBridgeRequestDto,
@@ -47,6 +56,8 @@ import { DeleteAgentCommand } from './usecases/delete-agent/delete-agent.command
 import { DeleteAgent } from './usecases/delete-agent/delete-agent.usecase';
 import { GetAgentCommand } from './usecases/get-agent/get-agent.command';
 import { GetAgent } from './usecases/get-agent/get-agent.usecase';
+import { GetAgentUsageCommand } from './usecases/get-agent-usage/get-agent-usage.command';
+import { GetAgentUsage } from './usecases/get-agent-usage/get-agent-usage.usecase';
 import { ListAgentsCommand } from './usecases/list-agents/list-agents.command';
 import { ListAgents } from './usecases/list-agents/list-agents.usecase';
 import { UpdateAgentCommand } from './usecases/update-agent/update-agent.command';
@@ -64,6 +75,7 @@ export class AgentsController {
     private readonly createAgentUsecase: CreateAgent,
     private readonly listAgentsUsecase: ListAgents,
     private readonly getAgentUsecase: GetAgent,
+    private readonly getAgentUsageUsecase: GetAgentUsage,
     private readonly updateAgentUsecase: UpdateAgent,
     private readonly deleteAgentUsecase: DeleteAgent,
     private readonly listAgentEmojiUsecase: ListAgentEmoji,
@@ -105,6 +117,7 @@ export class AgentsController {
   }
 
   @Post('/')
+  @OAuthAccessible()
   @ExternalApiAccessible()
   @KeylessAccessible()
   @SdkGroupName('Agents')
@@ -118,7 +131,11 @@ export class AgentsController {
   })
   @RequirePermissions(PermissionsEnum.AGENT_WRITE)
   @UseFilters(AgentRuntimeExceptionFilter)
-  createAgent(@UserSession() user: UserSessionData, @Body() body: CreateAgentRequestDto): Promise<AgentResponseDto> {
+  createAgent(
+    @UserSession() user: UserSessionData,
+    @Body() body: CreateAgentRequestDto,
+    @Headers(NOVU_ANALYTICS_SOURCE_HEADER) analyticsSourceHeader?: string
+  ): Promise<AgentResponseDto> {
     return this.createAgentUsecase.execute(
       CreateAgentCommand.create({
         userId: user._id,
@@ -130,11 +147,13 @@ export class AgentsController {
         active: body.active,
         runtime: body.runtime,
         managedRuntime: body.managedRuntime,
+        analyticsSource: isAgentAnalyticsSource(analyticsSourceHeader) ? analyticsSourceHeader : undefined,
       })
     );
   }
 
   @Get('/')
+  @OAuthAccessible()
   @ExternalApiAccessible()
   @KeylessAccessible()
   @SdkGroupName('Agents')
@@ -196,6 +215,7 @@ export class AgentsController {
   }
 
   @Get('/:identifier')
+  @OAuthAccessible()
   @ExternalApiAccessible()
   @SdkGroupName('Agents')
   @SdkMethodName('retrieve')
@@ -219,7 +239,33 @@ export class AgentsController {
     );
   }
 
+  @Get('/:identifier/usage')
+  @ApiExcludeEndpoint()
+  @ApiResponse(GetAgentUsageResponseDto)
+  @ApiOperation({
+    summary: 'Get agent usage',
+    description: 'Returns workflows in the current environment that have this agent assigned.',
+  })
+  @ApiNotFoundResponse({
+    description: 'The agent was not found.',
+  })
+  @RequirePermissions(PermissionsEnum.AGENT_READ)
+  getAgentUsage(
+    @UserSession() user: UserSessionData,
+    @Param('identifier') identifier: string
+  ): Promise<GetAgentUsageResponseDto> {
+    return this.getAgentUsageUsecase.execute(
+      GetAgentUsageCommand.create({
+        userId: user._id,
+        environmentId: user.environmentId,
+        organizationId: user.organizationId,
+        identifier,
+      })
+    );
+  }
+
   @Patch('/:identifier')
+  @OAuthAccessible()
   @ExternalApiAccessible()
   @SdkGroupName('Agents')
   @SdkMethodName('update')
@@ -255,6 +301,7 @@ export class AgentsController {
   }
 
   @Delete('/:identifier')
+  @OAuthAccessible()
   @ExternalApiAccessible()
   @SdkGroupName('Agents')
   @SdkMethodName('delete')
@@ -262,7 +309,7 @@ export class AgentsController {
   @ApiOperation({
     summary: 'Delete an agent',
     description:
-      'Delete an agent by identifier and remove all agent-integration links. ' +
+      'Delete an agent by identifier, remove all agent-integration links, and clear the agent assignment from any workflows that reference it. ' +
       'For managed-runtime agents, pass `deleteFromProvider=true` to also archive the agent on the provider side (e.g. Anthropic). ' +
       'By default only the Novu record is deleted and the provider agent is left intact.',
   })

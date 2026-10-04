@@ -1,32 +1,64 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import {
-  type ChannelConnectionAuth,
   decryptChannelConnectionAuth,
+  decryptChannelEndpoint,
   decryptCredentials,
-  encryptChannelConnectionAuth,
+  evaluateIntegrationRules,
+  hasIntegrationRules,
   InstrumentUsecase,
+  type MatchedIntegrationConditions,
   MsTeamsTokenService,
-  type WebexTokenRefreshResponse,
-  WebexTokenService,
+  RotatingConnectionTokenService,
 } from '@novu/application-generic';
 import {
   ChannelConnectionEntity,
   ChannelConnectionRepository,
   ChannelEndpointEntity,
   ChannelEndpointRepository,
+  IntegrationEntity,
   IntegrationRepository,
 } from '@novu/dal';
 import { ProvidersIdEnum } from '@novu/shared';
 import { ChannelData, ENDPOINT_TYPES, ENDPOINT_TYPES_REQUIRING_TOKEN } from '@novu/stateless';
 import { ResolveChannelEndpointsCommand } from './resolve-channel-endpoints.command';
 
-const TOKEN_REFRESH_WINDOW_MS = 5 * 60 * 1000;
+const LOG_CONTEXT = 'ResolveChannelEndpoints';
+
+type EndpointStoredSecretConfig = {
+  providerLabel: string;
+  /** Fields that must all be present (non-empty) after decrypt; missing any triggers one combined error. */
+  requiredFields: string[];
+};
+
+/**
+ * Tool endpoint types whose per-subscriber routing secret lives on the
+ * `ChannelEndpoint.endpoint` document. The resolver decrypts secret fields and
+ * returns the decrypted wire shape at send time — no channel connection lookup.
+ */
+const ENDPOINT_STORED_SECRET_CONFIGS: Partial<Record<string, EndpointStoredSecretConfig>> = {
+  [ENDPOINT_TYPES.PAGERDUTY_SERVICE]: { providerLabel: 'PagerDuty', requiredFields: ['routingKey', 'region'] },
+  [ENDPOINT_TYPES.OPSGENIE_INTEGRATION]: { providerLabel: 'Opsgenie', requiredFields: ['apiKey', 'region'] },
+  // authToken is optional and therefore not listed as required.
+  [ENDPOINT_TYPES.GRAFANA_ONCALL_INTEGRATION]: { providerLabel: 'Grafana', requiredFields: ['url'] },
+  [ENDPOINT_TYPES.TOOL_WEBHOOK]: { providerLabel: 'Tool Webhook', requiredFields: ['url'] },
+};
 
 export type IntegrationEndpoints = {
   integrationIdentifier: string;
   providerId: ProvidersIdEnum;
   channelData: ChannelData[];
+  matchedConditions?: MatchedIntegrationConditions;
 };
+
+interface DeliverableEndpoints {
+  endpoints: ChannelEndpointEntity[];
+  matchedConditionsByIdentifier: Map<string, MatchedIntegrationConditions>;
+}
+
+interface IntegrationRuleEvaluation {
+  deliverable: boolean;
+  matchedConditions?: MatchedIntegrationConditions;
+}
 
 /**
  * Resolves channel endpoints for a subscriber and groups them by integration.
@@ -51,14 +83,12 @@ export type IntegrationEndpoints = {
  */
 @Injectable()
 export class ResolveChannelEndpoints {
-  private readonly webexRefreshPromises = new Map<string, Promise<Record<string, unknown>>>();
-
   constructor(
     private readonly channelEndpointRepository: ChannelEndpointRepository,
     private readonly channelConnectionRepository: ChannelConnectionRepository,
     private readonly integrationRepository: IntegrationRepository,
     private readonly msTeamsTokenService: MsTeamsTokenService,
-    private readonly webexTokenService: WebexTokenService
+    private readonly rotatingConnectionTokenService: RotatingConnectionTokenService
   ) {}
 
   @InstrumentUsecase()
@@ -69,9 +99,96 @@ export class ResolveChannelEndpoints {
       return [];
     }
 
-    const connectionMap = await this.fetchConnectionMap(command, endpoints);
+    const deliverable = await this.keepEndpointsForDeliverableIntegrations(command, endpoints);
 
-    return this.buildIntegrationGroups(endpoints, connectionMap);
+    if (deliverable.endpoints.length === 0) {
+      return [];
+    }
+
+    const connectionMap = await this.fetchConnectionMap(command, deliverable.endpoints);
+
+    return this.buildIntegrationGroups(deliverable.endpoints, connectionMap, deliverable.matchedConditionsByIdentifier);
+  }
+
+  private async keepEndpointsForDeliverableIntegrations(
+    command: ResolveChannelEndpointsCommand,
+    endpoints: ChannelEndpointEntity[]
+  ): Promise<DeliverableEndpoints> {
+    const identifiers = [...new Set(endpoints.map((endpoint) => endpoint.integrationIdentifier))];
+
+    const activeIntegrations = await this.integrationRepository.find(
+      {
+        _environmentId: command.environmentId,
+        _organizationId: command.organizationId,
+        identifier: { $in: identifiers },
+        channel: command.channelType,
+        active: true,
+      },
+      'identifier rules'
+    );
+    const deliverableIdentifiers = new Set<string>();
+    const matchedConditionsByIdentifier = new Map<string, MatchedIntegrationConditions>();
+
+    for (const integration of activeIntegrations) {
+      const evaluation = this.evaluateEndpointDeliveryRules(command, integration);
+      if (!evaluation.deliverable) {
+        continue;
+      }
+
+      deliverableIdentifiers.add(integration.identifier);
+      if (evaluation.matchedConditions) {
+        matchedConditionsByIdentifier.set(integration.identifier, evaluation.matchedConditions);
+      }
+    }
+
+    return {
+      endpoints: endpoints.filter((endpoint) => deliverableIdentifiers.has(endpoint.integrationIdentifier)),
+      matchedConditionsByIdentifier,
+    };
+  }
+
+  /**
+   * Endpoint-routed delivery pins the integration by identifier, which makes `SelectIntegration`
+   * take its identifier shortcut and skip conditions entirely. Rules are therefore applied here,
+   * otherwise a subscriber holding endpoints on several integrations is notified through every one
+   * of them regardless of their conditions.
+   *
+   * Only `rules` (JSONLogic) are evaluated — legacy `conditions` predate the endpoint model and are
+   * left to `SelectIntegration`, matching the precedence rules take there.
+   */
+  private evaluateEndpointDeliveryRules(
+    command: ResolveChannelEndpointsCommand,
+    integration: Pick<IntegrationEntity, 'identifier' | 'rules'>
+  ): IntegrationRuleEvaluation {
+    if (!hasIntegrationRules(integration.rules)) {
+      return { deliverable: true };
+    }
+
+    const evaluation = evaluateIntegrationRules(integration.rules, {
+      payload: command.filterData?.payload,
+      subscriber: command.filterData?.subscriber,
+      context: command.filterData?.context,
+      workflow: command.filterData?.workflow,
+    });
+    const { issues } = evaluation;
+    if (issues.length > 0) {
+      Logger.warn(
+        {
+          issues,
+          integrationIdentifier: integration.identifier,
+          environmentId: command.environmentId,
+          subscriberId: command.subscriberId,
+        },
+        `${LOG_CONTEXT} — skipping endpoints for integration with invalid rules`
+      );
+
+      return { deliverable: false };
+    }
+
+    return {
+      deliverable: evaluation.result,
+      ...(evaluation.result && { matchedConditions: { type: 'rules', value: integration.rules } }),
+    };
   }
 
   private async fetchChannelEndpoints(command: ResolveChannelEndpointsCommand): Promise<ChannelEndpointEntity[]> {
@@ -118,13 +235,19 @@ export class ResolveChannelEndpoints {
 
   private async buildIntegrationGroups(
     endpoints: ChannelEndpointEntity[],
-    connectionMap: Map<string, ChannelConnectionEntity>
+    connectionMap: Map<string, ChannelConnectionEntity>,
+    matchedConditionsByIdentifier: Map<string, MatchedIntegrationConditions>
   ): Promise<IntegrationEndpoints[]> {
     const groupedByIntegration = this.groupEndpointsByIntegration(endpoints);
 
     return await Promise.all(
       Array.from(groupedByIntegration.entries()).map(([integrationIdentifier, groupEndpoints]) =>
-        this.buildIntegrationGroup(integrationIdentifier, groupEndpoints, connectionMap)
+        this.buildIntegrationGroup(
+          integrationIdentifier,
+          groupEndpoints,
+          connectionMap,
+          matchedConditionsByIdentifier.get(integrationIdentifier)
+        )
       )
     );
   }
@@ -144,12 +267,14 @@ export class ResolveChannelEndpoints {
   private async buildIntegrationGroup(
     integrationIdentifier: string,
     endpoints: ChannelEndpointEntity[],
-    connectionMap: Map<string, ChannelConnectionEntity>
+    connectionMap: Map<string, ChannelConnectionEntity>,
+    matchedConditions?: MatchedIntegrationConditions
   ): Promise<IntegrationEndpoints> {
     return {
       integrationIdentifier,
       providerId: endpoints[0].providerId,
       channelData: await Promise.all(endpoints.map((endpoint) => this.buildChannelData(endpoint, connectionMap))),
+      ...(matchedConditions && { matchedConditions }),
     };
   }
 
@@ -176,9 +301,10 @@ export class ResolveChannelEndpoints {
   }
 
   /**
-   * Extracts token for endpoint based on type
+   * Extracts token / hydrated endpoint data based on type
    * - MS Teams: Fetches Bot Framework token from Microsoft
-   * - Slack: Extracts OAuth token from connection
+   * - Slack / Webex: Reads the OAuth token from the connection, refreshing rotation-enabled tokens
+   * - PagerDuty / Opsgenie / Grafana / Tool Webhook: Decrypts secrets from endpoint.endpoint and hydrates the endpoint wire shape
    */
   private async extractToken(
     endpoint: ChannelEndpointEntity,
@@ -189,13 +315,44 @@ export class ResolveChannelEndpoints {
       return await this.extractMsTeamsToken(endpoint, connectionMap);
     }
 
-    if (endpoint.type === ENDPOINT_TYPES.WEBEX_ROOM || endpoint.type === ENDPOINT_TYPES.WEBEX_PERSON) {
-      return await this.extractWebexToken(endpoint, connectionMap);
+    if (
+      endpoint.type === ENDPOINT_TYPES.SLACK_CHANNEL ||
+      endpoint.type === ENDPOINT_TYPES.SLACK_USER ||
+      endpoint.type === ENDPOINT_TYPES.WEBEX_ROOM ||
+      endpoint.type === ENDPOINT_TYPES.WEBEX_PERSON
+    ) {
+      return await this.extractRotatingConnectionToken(endpoint, connectionMap);
     }
 
-    // Slack and other connection-based tokens
+    const endpointStoredSecretConfig = ENDPOINT_STORED_SECRET_CONFIGS[endpoint.type];
+    if (endpointStoredSecretConfig) {
+      return this.extractEndpointStoredSecrets(endpoint, endpointStoredSecretConfig);
+    }
+
+    // Other connection-based tokens
     const token = this.extractConnectionToken(endpoint, connectionMap);
     return { token: token || '' };
+  }
+
+  /**
+   * Decrypts tool routing secrets from `ChannelEndpoint.endpoint` and returns
+   * an `endpoint` override so `buildChannelData`'s spread replaces the
+   * encrypted stored document with the plaintext wire shape providers read.
+   * `requiredFields` must all be present or the whole endpoint is rejected.
+   */
+  private extractEndpointStoredSecrets(
+    endpoint: ChannelEndpointEntity,
+    config: EndpointStoredSecretConfig
+  ): Record<string, unknown> {
+    const { providerLabel, requiredFields } = config;
+    const decrypted = decryptChannelEndpoint(endpoint.type, endpoint.endpoint);
+    const decryptedFields = decrypted as Record<string, unknown>;
+
+    if (requiredFields.some((field) => !decryptedFields[field])) {
+      throw new Error(`${providerLabel} endpoint ${endpoint.identifier} is missing ${requiredFields.join(' or ')}`);
+    }
+
+    return { endpoint: decrypted };
   }
 
   /**
@@ -250,7 +407,28 @@ export class ResolveChannelEndpoints {
   }
 
   /**
-   * Extracts OAuth token from connection (Slack, etc.)
+   * Extracts the bot token from the linked connection for providers with rotating OAuth
+   * tokens (Slack, Webex), refreshing it first when the app uses token rotation
+   * (refreshToken + expiresAt persisted by the OAuth callback).
+   */
+  private async extractRotatingConnectionToken(
+    endpoint: ChannelEndpointEntity,
+    connectionMap: Map<string, ChannelConnectionEntity>
+  ): Promise<Record<string, unknown>> {
+    const connection = endpoint.connectionIdentifier ? connectionMap.get(endpoint.connectionIdentifier) : undefined;
+
+    if (!connection?.auth) {
+      return { token: '' };
+    }
+
+    const token = await this.rotatingConnectionTokenService.getConnectionToken(connection);
+
+    return { token: token || '' };
+  }
+
+  /**
+   * Extracts a plain OAuth access token from the linked connection (fallback for
+   * endpoint types without dedicated token handling).
    */
   private extractConnectionToken(
     endpoint: ChannelEndpointEntity,
@@ -272,130 +450,5 @@ export class ResolveChannelEndpoints {
     const decryptedAuth = decryptChannelConnectionAuth(connection.auth);
 
     return decryptedAuth?.accessToken;
-  }
-
-  private async extractWebexToken(
-    endpoint: ChannelEndpointEntity,
-    connectionMap: Map<string, ChannelConnectionEntity>
-  ): Promise<Record<string, unknown>> {
-    const connection = endpoint.connectionIdentifier ? connectionMap.get(endpoint.connectionIdentifier) : undefined;
-
-    if (!connection?.auth) {
-      throw new Error(`Webex endpoint ${endpoint.identifier} requires a channel connection`);
-    }
-
-    const decryptedAuth = decryptChannelConnectionAuth(connection.auth);
-    const accessToken = decryptedAuth?.accessToken;
-
-    if (!accessToken) {
-      throw new Error(`Webex channel connection ${connection.identifier} is missing an access token`);
-    }
-
-    if (!this.shouldRefreshToken(decryptedAuth.expiresAt)) {
-      return { token: accessToken };
-    }
-
-    if (!decryptedAuth.refreshToken) {
-      throw new Error(`Webex channel connection ${connection.identifier} is missing a refresh token`);
-    }
-
-    const refreshKey = this.buildWebexRefreshKey(connection);
-    const existingRefresh = this.webexRefreshPromises.get(refreshKey);
-
-    if (existingRefresh) {
-      return await existingRefresh;
-    }
-
-    const refreshPromise = this.refreshWebexConnectionToken(endpoint, connection, decryptedAuth);
-    this.webexRefreshPromises.set(refreshKey, refreshPromise);
-
-    try {
-      return await refreshPromise;
-    } finally {
-      this.webexRefreshPromises.delete(refreshKey);
-    }
-  }
-
-  private async refreshWebexConnectionToken(
-    endpoint: ChannelEndpointEntity,
-    connection: ChannelConnectionEntity,
-    decryptedAuth: ChannelConnectionAuth
-  ): Promise<Record<string, unknown>> {
-    if (!decryptedAuth.refreshToken) {
-      throw new Error(`Webex channel connection ${connection.identifier} is missing a refresh token`);
-    }
-
-    const integration = await this.integrationRepository.findOne({
-      identifier: endpoint.integrationIdentifier,
-      _environmentId: endpoint._environmentId,
-      _organizationId: endpoint._organizationId,
-    });
-
-    if (!integration?.credentials) {
-      throw new Error(`Integration ${endpoint.integrationIdentifier} missing credentials for Webex Messaging`);
-    }
-
-    const credentials = decryptCredentials(integration.credentials);
-    const { clientId, secretKey } = credentials;
-
-    if (!clientId || !secretKey) {
-      throw new Error(`Integration ${endpoint.integrationIdentifier} missing required Webex OAuth credentials`);
-    }
-
-    const refreshed = await this.webexTokenService.refreshAccessToken(decryptedAuth.refreshToken, clientId, secretKey);
-
-    if (!refreshed.access_token) {
-      throw new Error(`Webex token refresh did not return an access token for connection ${connection.identifier}`);
-    }
-
-    const refreshedAuth = {
-      ...decryptedAuth,
-      accessToken: refreshed.access_token,
-      refreshToken: refreshed.refresh_token ?? decryptedAuth.refreshToken,
-      expiresAt: this.buildExpiresAt(refreshed.expires_in) ?? decryptedAuth.expiresAt,
-      refreshTokenExpiresAt:
-        this.buildExpiresAt(refreshed.refresh_token_expires_in) ?? decryptedAuth.refreshTokenExpiresAt,
-    };
-
-    await this.channelConnectionRepository.findOneAndUpdate(
-      {
-        _environmentId: endpoint._environmentId,
-        _organizationId: endpoint._organizationId,
-        identifier: connection.identifier,
-      },
-      {
-        $set: {
-          auth: encryptChannelConnectionAuth(refreshedAuth),
-        },
-      }
-    );
-
-    return { token: refreshedAuth.accessToken };
-  }
-
-  private buildWebexRefreshKey(connection: ChannelConnectionEntity): string {
-    return `${connection._organizationId}:${connection._environmentId}:${connection.identifier}`;
-  }
-
-  private shouldRefreshToken(expiresAt?: string): boolean {
-    if (!expiresAt) {
-      return false;
-    }
-
-    const expiresAtTime = new Date(expiresAt).getTime();
-
-    if (Number.isNaN(expiresAtTime)) {
-      return false;
-    }
-
-    return expiresAtTime - Date.now() <= TOKEN_REFRESH_WINDOW_MS;
-  }
-
-  private buildExpiresAt(expiresInSeconds?: WebexTokenRefreshResponse['expires_in']): string | undefined {
-    if (!expiresInSeconds) {
-      return undefined;
-    }
-
-    return new Date(Date.now() + expiresInSeconds * 1000).toISOString();
   }
 }

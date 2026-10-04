@@ -4,6 +4,7 @@ import type { BridgeScaffoldVariant } from '../pipeline/bridge/types';
 import type { BridgeAdapterVariant } from '../pipeline/bridge-adapter/types';
 import type { LlmAuthKind } from '../pipeline/llm-auth/types';
 import type {
+  WebChatConnectOutcome,
   AgentConnectMode,
   AgentSummary,
   AiSdkConnectOutcome,
@@ -88,6 +89,7 @@ export type Phase =
       projectDir: string;
       appName: string;
       variant?: BridgeScaffoldVariant;
+      llmAuthLabel?: string;
       resolve: (confirmed: boolean) => void;
     }
   | { kind: 'scaffolding-bridge'; variant: BridgeScaffoldVariant }
@@ -130,6 +132,21 @@ export type Phase =
       channel: ChannelChoice;
       agentDetailsUrl: string;
       resolve: () => void;
+    }
+  | { kind: 'adding-whatsapp' }
+  | {
+      kind: 'whatsapp-signup-ready';
+      signupUrl: string;
+      /** Resolves when the user hits Enter — the pipeline then runs `open()`. */
+      resolve: () => void;
+    }
+  | { kind: 'whatsapp-signup-waiting'; signupUrl: string }
+  | {
+      kind: 'whatsapp-test';
+      waMeUrl?: string;
+      /** Pre-rendered ASCII QR for the wa.me deep link. */
+      waMeQr?: string;
+      displayPhoneNumber?: string;
     }
   | { kind: 'adding-slack' }
   | {
@@ -231,6 +248,19 @@ export type Phase =
       fromNumber: string;
       imessageUrl: string;
     }
+  | { kind: 'adding-web-chat' }
+  | {
+      kind: 'web-chat-handoff';
+      dashboardUrl: string;
+      embedPromptFile?: string;
+      resolve: () => void;
+    }
+  | {
+      kind: 'pick-web-chat-setup';
+      projectKind: 'empty' | 'project';
+      resolve: (mode: import('../types').WebChatSetupMode) => void;
+    }
+  | { kind: 'scaffolding-web-chat' }
   | { kind: 'sending-welcome' }
   | {
       kind: 'success';
@@ -249,6 +279,11 @@ export type Phase =
       aiSdkOutcome?: AiSdkConnectOutcome;
       langChainOutcome?: LangChainConnectOutcome;
       customCodeOutcome?: CustomCodeConnectOutcome;
+      webChatOutcome?: WebChatConnectOutcome;
+      webChatHandoff?: { dashboardUrl: string; embedPromptFile?: string };
+      embedPrompt?: string;
+      embedPromptFile?: string;
+      resolveDismiss?: () => void | Promise<void>;
     }
   | { kind: 'error'; message: string };
 

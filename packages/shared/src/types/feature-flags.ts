@@ -37,6 +37,15 @@ export enum FeatureFlagsKeysEnum {
   IS_EVENT_QUOTA_THROTTLER_ENABLED = 'IS_EVENT_QUOTA_THROTTLER_ENABLED',
   IS_NEW_MESSAGES_API_RESPONSE_ENABLED = 'IS_NEW_MESSAGES_API_RESPONSE_ENABLED',
   IS_USAGE_ALERTS_ENABLED = 'IS_USAGE_ALERTS_ENABLED',
+  /** Stops the usage-alerts cron before it reads usage. Default off, so the cron runs. */
+  IS_USAGE_ALERTS_CRON_DISABLED = 'IS_USAGE_ALERTS_CRON_DISABLED',
+  /**
+   * Organization-scoped, read only when subscriber-process jobs are enqueued (`TriggerBase`): moves the usage
+   * counter increment from enqueue to workflow-run creation (`CreateNotificationJobs`), matching what ClickHouse
+   * counts. Transitional (NV-8853): remove with the enqueue-time increment and the job stamp once on for all
+   * organizations and the subscriber-process queue has drained.
+   */
+  IS_USAGE_COUNTER_WORKER_INCREMENT_ENABLED = 'IS_USAGE_COUNTER_WORKER_INCREMENT_ENABLED',
   IS_USE_MERGED_DIGEST_ID_ENABLED = 'IS_USE_MERGED_DIGEST_ID_ENABLED',
   IS_V2_ENABLED = 'IS_V2_ENABLED',
 
@@ -45,6 +54,11 @@ export enum FeatureFlagsKeysEnum {
   IS_KEYLESS_ENVIRONMENT_CREATION_ENABLED = 'IS_KEYLESS_ENVIRONMENT_CREATION_ENABLED',
   /** Dashboard "Local" pseudo-environment for previewing workflows from a local bridge (replaces the legacy local studio). */
   IS_LOCAL_ENVIRONMENT_ENABLED = 'IS_LOCAL_ENVIRONMENT_ENABLED',
+  /**
+   * Rich Chat: gates the block editor in the dashboard, Maily→card compilation in the API renderer,
+   * and native card delivery in the worker.
+   */
+  IS_CHAT_BLOCK_EDITOR_ENABLED = 'IS_CHAT_BLOCK_EDITOR_ENABLED',
   IS_KEYLESS_AGENT_AI_ENABLED = 'IS_KEYLESS_AGENT_AI_ENABLED',
   /** When enabled, API-key auth on GET /v1/environments returns decrypted apiKeys for every environment in the org (pre-NV-7641 opt-in behavior). */
   IS_LIST_ENVIRONMENTS_API_KEYS_ENABLED = 'IS_LIST_ENVIRONMENTS_API_KEYS_ENABLED',
@@ -58,6 +72,7 @@ export enum FeatureFlagsKeysEnum {
   IS_TRACE_LOGS_ENABLED = 'IS_TRACE_LOGS_ENABLED',
   IS_TRACE_LOGS_READ_ENABLED = 'IS_TRACE_LOGS_READ_ENABLED',
   IS_INBOUND_WEBHOOKS_ENABLED = 'IS_INBOUND_WEBHOOKS_ENABLED',
+  IS_INBOUND_WEBHOOK_ATTACHMENT_URLS_ENABLED = 'IS_INBOUND_WEBHOOK_ATTACHMENT_URLS_ENABLED',
   IS_INBOUND_WEBHOOKS_CONFIGURATION_ENABLED = 'IS_INBOUND_WEBHOOKS_CONFIGURATION_ENABLED',
   IS_STEP_RUN_LOGS_READ_ENABLED = 'IS_STEP_RUN_LOGS_READ_ENABLED',
   IS_STEP_RUN_LOGS_WRITE_ENABLED = 'IS_STEP_RUN_LOGS_WRITE_ENABLED',
@@ -80,7 +95,10 @@ export enum FeatureFlagsKeysEnum {
   /** When true, integration lookup may match across environments in the same organization (opt-in for regressed customers). Default is false (environment-scoped). */
   IS_CROSS_ENVIRONMENT_INTEGRATION_ENABLED = 'IS_CROSS_ENVIRONMENT_INTEGRATION_ENABLED',
   IS_PREFERENCE_FETCH_OPTIMIZATION_ENABLED = 'IS_PREFERENCE_FETCH_OPTIMIZATION_ENABLED',
+  /** Platform-wide billing usage (Stripe usage records) source. Keep off until shadow mode proves parity. */
   IS_BILLING_USAGE_CLICKHOUSE_ENABLED = 'IS_BILLING_USAGE_CLICKHOUSE_ENABLED',
+  /** Organization-scoped usage source for the event quota check and dashboard subscription usage. */
+  IS_BILLING_QUOTA_CLICKHOUSE_ENABLED = 'IS_BILLING_QUOTA_CLICKHOUSE_ENABLED',
   IS_BILLING_USAGE_CLICKHOUSE_SHADOW_ENABLED = 'IS_BILLING_USAGE_CLICKHOUSE_SHADOW_ENABLED',
   IS_BILLING_USAGE_DETAILED_DIAGNOSTICS_ENABLED = 'IS_BILLING_USAGE_DETAILED_DIAGNOSTICS_ENABLED',
   IS_AI_WORKFLOW_GENERATION_ENABLED = 'IS_AI_WORKFLOW_GENERATION_ENABLED',
@@ -100,6 +118,19 @@ export enum FeatureFlagsKeysEnum {
   IS_MANAGED_AGENT_RUNTIME_ENABLED = 'IS_MANAGED_AGENT_RUNTIME_ENABLED',
   /** Enable Novu-managed demo Claude provider auto-provisioned on dev environments. Create the boolean in LaunchDarkly for cloud, or set `VITE_IS_DEMO_MANAGED_CLAUDE_ENABLED` when self-hosted. */
   IS_DEMO_MANAGED_CLAUDE_ENABLED = 'IS_DEMO_MANAGED_CLAUDE_ENABLED',
+  /**
+   * Enable framework `ctx.ask` / `ctx.approve` / `ctx.choose` / `ctx.tell` human
+   * interactions delivered into the agent conversation. Create the boolean in
+   * LaunchDarkly for cloud, or set `IS_AGENT_HUMAN_HITL_ENABLED` when self-hosted.
+   */
+  IS_AGENT_HUMAN_HITL_ENABLED = 'IS_AGENT_HUMAN_HITL_ENABLED',
+  /**
+   * Enable the Web Chat channel (subscriber `/v1/web-chat/*`, useWebChat wayfinder).
+   * Requires conversational agents. Create the boolean in LaunchDarkly for cloud, or set
+   * `IS_AGENT_WEB_CHAT_ENABLED` when self-hosted (`VITE_IS_AGENT_WEB_CHAT_ENABLED` for dashboard).
+   * Flag key kept as IS_AGENT_WEB_CHAT_ENABLED (LaunchDarkly / env already deployed).
+   */
+  IS_AGENT_WEB_CHAT_ENABLED = 'IS_AGENT_WEB_CHAT_ENABLED',
   /** Enable the "What's next" section on the agent overview. Create the boolean in LaunchDarkly for cloud, or set `VITE_IS_AGENT_WHATS_NEXT_ENABLED` when self-hosted. */
   IS_AGENT_WHATS_NEXT_ENABLED = 'IS_AGENT_WHATS_NEXT_ENABLED',
   /** Enable the MS Teams subscriber-rollout "What's next" guide (distribute the bot + connect end users) and its post-connect "Continue" CTA. When off, MS Teams shows the generic continue note and hides the rollout guide. Create the boolean in LaunchDarkly for cloud, or set `VITE_IS_AGENT_MSTEAMS_WHATS_NEXT_ENABLED` when self-hosted. */
@@ -110,6 +141,11 @@ export enum FeatureFlagsKeysEnum {
   IS_MSTEAMS_QUICK_SETUP_ENABLED = 'IS_MSTEAMS_QUICK_SETUP_ENABLED',
   /** Enable Slack Quick Setup in the dashboard; create the boolean in LaunchDarkly for cloud, or set `VITE_IS_SLACK_QUICK_SETUP_ENABLED` when self-hosted. */
   IS_SLACK_QUICK_SETUP_ENABLED = 'IS_SLACK_QUICK_SETUP_ENABLED',
+  /**
+   * Enable NovuCopilot on Slack — the Novu-hosted Slack agent that lets a customer create Novu
+   * workflows by chatting in Slack.
+   */
+  IS_NOVU_COPILOT_SLACK_ENABLED = 'IS_NOVU_COPILOT_SLACK_ENABLED',
   /** Enable the Domains management page in the dashboard. */
   IS_DOMAINS_PAGE_ENABLED = 'IS_DOMAINS_PAGE_ENABLED',
   /** Enable Domain Connect auto-configuration for inbound email domains. */
@@ -140,10 +176,61 @@ export enum FeatureFlagsKeysEnum {
    * organization for the duration of the rotation, then disable.
    */
   IS_MULTIPLE_SECRET_KEYS_ALLOWED = 'IS_MULTIPLE_SECRET_KEYS_ALLOWED',
+  /**
+   * Stop duplicating the trigger payload onto every job and every non-in-app
+   * message. When enabled, new jobs and email/SMS/push messages no longer
+   * persist `payload`; readers resolve it from the parent notification via
+   * `_notificationId`. In-app messages keep their payload for legacy feed
+   * filtering. Read paths handle both shapes regardless of this flag, so it can
+   * be toggled off at any time (forward-only, no data migration). Create the
+   * boolean in LaunchDarkly for cloud, or set `IS_PAYLOAD_DEDUP_ENABLED` when
+   * self-hosted.
+   */
+  IS_PAYLOAD_DEDUP_ENABLED = 'IS_PAYLOAD_DEDUP_ENABLED',
+  /**
+   * Trace step condition evaluation in the activity feed regardless of outcome:
+   * a "step conditions matched" detail when conditions pass, and a "step was
+   * skipped based on steps conditions" detail when they do not (v2 skip
+   * conditions, HTTP Request steps, and legacy v1 filters including webhook
+   * filters). Legacy v1 skipped steps still persist their skip detail when
+   * this flag is off. Create the boolean in LaunchDarkly for cloud, or set
+   * `IS_STEP_CONDITIONS_EVALUATION_TRACE_ENABLED` when self-hosted.
+   */
+  IS_STEP_CONDITIONS_EVALUATION_TRACE_ENABLED = 'IS_STEP_CONDITIONS_EVALUATION_TRACE_ENABLED',
+  /**
+   * Stop embedding the fully populated workflow step (message template
+   * `content`, `controls`, `cta`, `variables`, variants' templates, `output`
+   * schemas, etc.) onto every job's `step`. When enabled, new jobs persist a
+   * lean step (ids, filters, metadata, a `{ _id, type }` template stub) and the
+   * worker rehydrates the full template at execution time (see
+   * StepTemplateHydrationService for the resolution/fallback order). Jobs
+   * written while the flag is off (and all pre-existing jobs) carry the full
+   * snapshot and skip hydration entirely, so the flag is forward-only and safe
+   * to toggle off at any time (no data migration). Create the boolean in
+   * LaunchDarkly for cloud, or set `IS_JOB_STEP_DEDUP_ENABLED` when self-hosted.
+   */
+  IS_JOB_STEP_DEDUP_ENABLED = 'IS_JOB_STEP_DEDUP_ENABLED',
+  /** Enable the Tool channel (PagerDuty, Opsgenie, and custom webhooks). */
+  IS_TOOL_CHANNEL_ENABLED = 'IS_TOOL_CHANNEL_ENABLED',
+  /**
+   * Enable assigning an agent to a workflow in the dashboard ("Send & reply via agent").
+   * Create the boolean in LaunchDarkly for cloud, or set
+   * `VITE_IS_WORKFLOW_AGENT_ASSIGNMENT_ENABLED` when self-hosted.
+   */
+  IS_WORKFLOW_AGENT_ASSIGNMENT_ENABLED = 'IS_WORKFLOW_AGENT_ASSIGNMENT_ENABLED',
+  /** Enable per-provider content overrides on chat steps (Slack schema, free-form elsewhere). */
+  IS_CHAT_PROVIDER_OVERRIDES_ENABLED = 'IS_CHAT_PROVIDER_OVERRIDES_ENABLED',
+
+  /**
+   * When true (default), the deprecated per-subscriber chat OAuth routes require
+   * HMAC to be enabled on the Slack integration and a valid subscriber HMAC hash.
+   * Target legacy organizations to false in LaunchDarkly so they can keep the
+   * historical behavior during migration. Self-hosted: set
+   * `IS_SUBSCRIBER_CHAT_OAUTH_HMAC_REQUIRED_ENABLED=false` to disable enforcement.
+   */
+  IS_SUBSCRIBER_CHAT_OAUTH_HMAC_REQUIRED_ENABLED = 'IS_SUBSCRIBER_CHAT_OAUTH_HMAC_REQUIRED_ENABLED',
 
   // String flags
-  CF_SCHEDULER_MODE = 'CF_SCHEDULER_MODE', // Values: "off" | "shadow" | "live" | "complete"
-  QUEUE_BACKEND_MODE = 'QUEUE_BACKEND_MODE', // Values: "bullmq" | "shadow" | "live" | "complete"
   USAGE_REPORT_TRIGGER_SECRET = 'USAGE_REPORT_TRIGGER_SECRET',
   USAGE_REPORT_OVERRIDE_EMAIL = 'USAGE_REPORT_OVERRIDE_EMAIL',
 
@@ -159,25 +246,23 @@ export enum FeatureFlagsKeysEnum {
   MAX_SUBSCRIBER_DEVICE_TOKENS_NUMBER = 'MAX_SUBSCRIBER_DEVICE_TOKENS_NUMBER',
   MAX_ENVIRONMENT_VARIABLES_LIMIT_NUMBER = 'MAX_ENVIRONMENT_VARIABLES_LIMIT_NUMBER',
   MAX_STEP_RESOLVERS_NUMBER = 'MAX_STEP_RESOLVERS_NUMBER',
+  /**
+   * Max conditions (or nested groups) allowed in a single step-conditions group.
+   * Default is 10 when the flag is unset, invalid, or below 1. Create the number
+   * in LaunchDarkly for cloud, or set `VITE_MAX_STEP_CONDITIONS_PER_GROUP_NUMBER`
+   * when self-hosted.
+   */
+  MAX_STEP_CONDITIONS_PER_GROUP_NUMBER = 'MAX_STEP_CONDITIONS_PER_GROUP_NUMBER',
   MAX_DOMAINS_LIMIT_NUMBER = 'MAX_DOMAINS_LIMIT_NUMBER',
   MAX_AGENTS_LIMIT_NUMBER = 'MAX_AGENTS_LIMIT_NUMBER',
   MAX_CUSTOM_EMAIL_DOMAINS_NUMBER = 'MAX_CUSTOM_EMAIL_DOMAINS_NUMBER',
+  /**
+   * When greater than 0, replaces the tier-derived usage-alert cap and lowers the candidate
+   * query to 75% of this value. 0 keeps the real cap. Set it in the staging environment only.
+   */
+  USAGE_ALERTS_ALLOWANCE_OVERRIDE_NUMBER = 'USAGE_ALERTS_ALLOWANCE_OVERRIDE_NUMBER',
   IS_ANALYTICS_PAGE_ENABLED = 'IS_ANALYTICS_PAGE_ENABLED',
   IS_LEGACY_SELECTOR_BUTTON_VISIBLE = 'IS_LEGACY_SELECTOR_BUTTON_VISIBLE',
-}
-
-export enum CloudflareSchedulerMode {
-  OFF = 'off',
-  SHADOW = 'shadow',
-  LIVE = 'live',
-  COMPLETE = 'complete',
-}
-
-export enum QueueBackendMode {
-  BULLMQ = 'bullmq',
-  SHADOW = 'shadow',
-  LIVE = 'live',
-  COMPLETE = 'complete',
 }
 
 export type FeatureFlags = {

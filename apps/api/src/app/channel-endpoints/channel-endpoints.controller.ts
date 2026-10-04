@@ -26,30 +26,39 @@ import {
 import { RequireAuthentication } from '../auth/framework/auth.decorator';
 import { ThrottlerCategory } from '../rate-limiting/guards/throttler.decorator';
 import { ApiCommonResponses, ApiResponse } from '../shared/framework/response.decorator';
+import { KeylessAccessible } from '../shared/framework/swagger/keyless.security';
 import { SdkGroupName, SdkMethodName } from '../shared/framework/swagger/sdk.decorators';
 import { UserSession } from '../shared/framework/user.decorator';
 import { CreateChannelEndpointRequest } from './dtos/create-channel-endpoint-request.dto';
 import {
+  CreateGrafanaOnCallIntegrationEndpointDto,
   CreateLineUserEndpointDto,
   CreateMsTeamsChannelEndpointDto,
   CreateMsTeamsUserEndpointDto,
+  CreateOpsgenieIntegrationEndpointDto,
+  CreatePagerDutyServiceEndpointDto,
   CreatePhoneEndpointDto,
   CreateSlackChannelEndpointDto,
   CreateSlackUserEndpointDto,
   CreateTelegramChatEndpointDto,
+  CreateToolWebhookEndpointDto,
   CreateWebexPersonEndpointDto,
   CreateWebexRoomEndpointDto,
   CreateWebhookEndpointDto,
 } from './dtos/create-channel-endpoint-variants.dto';
 import { mapChannelEndpointEntityToDto } from './dtos/dto.mapper';
 import {
+  GrafanaOnCallIntegrationEndpointDto,
   LineUserEndpointDto,
   MsTeamsChannelEndpointDto,
   MsTeamsUserEndpointDto,
+  OpsgenieIntegrationEndpointDto,
+  PagerDutyServiceEndpointDto,
   PhoneEndpointDto,
   SlackChannelEndpointDto,
   SlackUserEndpointDto,
   TelegramChatEndpointDto,
+  ToolWebhookEndpointDto,
   WebexPersonEndpointDto,
   WebexRoomEndpointDto,
   WebhookEndpointDto,
@@ -83,6 +92,10 @@ import { UpdateChannelEndpoint } from './usecases/update-channel-endpoint/update
   CreateWebexPersonEndpointDto,
   CreateWebexRoomEndpointDto,
   CreateLineUserEndpointDto,
+  CreatePagerDutyServiceEndpointDto,
+  CreateOpsgenieIntegrationEndpointDto,
+  CreateGrafanaOnCallIntegrationEndpointDto,
+  CreateToolWebhookEndpointDto,
   SlackChannelEndpointDto,
   SlackUserEndpointDto,
   WebhookEndpointDto,
@@ -92,7 +105,11 @@ import { UpdateChannelEndpoint } from './usecases/update-channel-endpoint/update
   TelegramChatEndpointDto,
   WebexPersonEndpointDto,
   WebexRoomEndpointDto,
-  LineUserEndpointDto
+  LineUserEndpointDto,
+  PagerDutyServiceEndpointDto,
+  OpsgenieIntegrationEndpointDto,
+  GrafanaOnCallIntegrationEndpointDto,
+  ToolWebhookEndpointDto
 )
 @ExternalApiAccessible()
 @RequireAuthentication()
@@ -115,6 +132,10 @@ export class ChannelEndpointsController {
   })
   @ApiResponse(ListChannelEndpointsResponseDto, 200)
   @ExternalApiAccessible()
+  // Keyless: the `human` CLI setup polls this list to detect the Telegram
+  // /start link landing; the keyless strategy already scopes results to the
+  // caller's own keyless environment.
+  @KeylessAccessible()
   @SdkMethodName('list')
   @RequirePermissions(PermissionsEnum.INTEGRATION_READ)
   async listChannelEndpoints(
@@ -192,6 +213,10 @@ export class ChannelEndpointsController {
         { $ref: getSchemaPath(CreateWebexRoomEndpointDto) },
         { $ref: getSchemaPath(CreateWebexPersonEndpointDto) },
         { $ref: getSchemaPath(CreateLineUserEndpointDto) },
+        { $ref: getSchemaPath(CreatePagerDutyServiceEndpointDto) },
+        { $ref: getSchemaPath(CreateOpsgenieIntegrationEndpointDto) },
+        { $ref: getSchemaPath(CreateGrafanaOnCallIntegrationEndpointDto) },
+        { $ref: getSchemaPath(CreateToolWebhookEndpointDto) },
       ],
       discriminator: {
         propertyName: 'type',
@@ -206,6 +231,10 @@ export class ChannelEndpointsController {
           [ENDPOINT_TYPES.WEBEX_ROOM]: getSchemaPath(CreateWebexRoomEndpointDto),
           [ENDPOINT_TYPES.WEBEX_PERSON]: getSchemaPath(CreateWebexPersonEndpointDto),
           [ENDPOINT_TYPES.LINE_USER]: getSchemaPath(CreateLineUserEndpointDto),
+          [ENDPOINT_TYPES.PAGERDUTY_SERVICE]: getSchemaPath(CreatePagerDutyServiceEndpointDto),
+          [ENDPOINT_TYPES.OPSGENIE_INTEGRATION]: getSchemaPath(CreateOpsgenieIntegrationEndpointDto),
+          [ENDPOINT_TYPES.GRAFANA_ONCALL_INTEGRATION]: getSchemaPath(CreateGrafanaOnCallIntegrationEndpointDto),
+          [ENDPOINT_TYPES.TOOL_WEBHOOK]: getSchemaPath(CreateToolWebhookEndpointDto),
         },
       },
     },
@@ -226,6 +255,7 @@ export class ChannelEndpointsController {
         integrationIdentifier: body.integrationIdentifier,
         connectionIdentifier: body.connectionIdentifier,
         subscriberId: body.subscriberId,
+        createSubscriberIfMissing: body.createSubscriberIfMissing,
         context: body.context,
         type: body.type,
         endpoint: body.endpoint as ChannelEndpointByType[typeof body.type],

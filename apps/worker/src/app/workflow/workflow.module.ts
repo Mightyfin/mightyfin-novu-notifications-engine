@@ -9,6 +9,7 @@ import {
   CompileTemplate,
   ConditionsFilter,
   CreateExecutionDetails,
+  CreateStepConditionEvaluationDetail,
   ExecuteStepResolverRequest,
   GetDecryptedIntegrations,
   GetLayoutUseCaseV0,
@@ -23,8 +24,10 @@ import {
   MsTeamsTokenService,
   NormalizeVariables,
   ProcessTenant,
-  ResolveTriggerContexts,
   RedisThrottleService,
+  ResolveAgentInboundAddresses,
+  ResolveTriggerContexts,
+  RotatingConnectionTokenService,
   SelectIntegration,
   SelectVariant,
   SendWebhookMessage,
@@ -33,7 +36,6 @@ import {
   TriggerEvent,
   TriggerMulticast,
   VerifyPayload,
-  WebexTokenService,
   WorkflowInMemoryProviderService,
 } from '@novu/application-generic';
 import {
@@ -71,6 +73,7 @@ import {
   SendMessageInApp,
   SendMessagePush,
   SendMessageSms,
+  SendMessageTool,
   SetJobAsCompleted,
   SetJobAsFailed,
   Throttle,
@@ -173,6 +176,7 @@ const USE_CASES = [
   CompileEmailTemplate,
   CompileTemplate,
   CreateExecutionDetails,
+  CreateStepConditionEvaluationDetail,
   ConditionsFilter,
   NormalizeVariables,
   BulkCreateExecutionDetails,
@@ -189,6 +193,7 @@ const USE_CASES = [
   HandleLastFailedJob,
   ProcessTenant,
   ResolveTriggerContexts,
+  ResolveAgentInboundAddresses,
   QueueNextJob,
   RunJob,
   SendMessage,
@@ -197,6 +202,7 @@ const USE_CASES = [
   SendMessageEmail,
   SendMessageInApp,
   SendMessagePush,
+  SendMessageTool,
   SendMessageSms,
   Throttle,
   ExecuteCodeFirstCustomStep,
@@ -227,7 +233,7 @@ const USE_CASES = [
   ResolveChannelEndpoints,
 ];
 
-const PROVIDERS: Provider[] = [RedisThrottleService, MsTeamsTokenService, WebexTokenService];
+const PROVIDERS: Provider[] = [RedisThrottleService, MsTeamsTokenService, RotatingConnectionTokenService];
 const activeWorkersToken: any = {
   provide: 'ACTIVE_WORKERS',
   useFactory: (...args: any[]) => {

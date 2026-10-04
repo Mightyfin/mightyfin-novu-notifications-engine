@@ -46,6 +46,11 @@ Examples (non-interactive / agent / CI):
       --ci \\
       --channel email
 
+  Dashboard OAuth WhatsApp (Meta Embedded Signup — completed in the browser, CLI polls until done):
+    npx novu connect "A support assistant for Acme's customers that answers billing questions." \\
+      --ci \\
+      --channel whatsapp
+
   Keyless Slack (no Novu account — pass --keyless):
     npx novu connect "A support assistant for Acme's customers that answers billing questions." \\
       --ci \\
@@ -63,6 +68,12 @@ Examples (non-interactive / agent / CI):
       --ci \\
       --keyless \\
       --channel telegram
+
+  Keyless WhatsApp (Meta Embedded Signup — completed in the browser, CLI polls until done):
+    npx novu connect "A support assistant for Acme's customers that answers billing questions." \\
+      --ci \\
+      --keyless \\
+      --channel whatsapp
 
   Keyless iMessage (Sendblue) — all four flags required (no secure setup page):
     npx novu connect "A concierge for Acme's shoppers that helps with orders." \\
@@ -108,7 +119,7 @@ Non-interactive (agent / CI) contract:
 
   Required for --ci mode:
     - Pass the agent description as the positional <prompt> argument or --prompt (managed path only).
-    - Pass --channel <slack|email|telegram|sendblue|skip> (or whatsapp/teams without --keyless).
+    - Pass --channel <slack|email|telegram|sendblue|whatsapp|web-chat|skip> (teams only without --keyless).
     - Bridge path: pass --runtime ai-sdk or --runtime langchain (omit the positional description).
 
   Authentication (pick one):
@@ -121,7 +132,9 @@ Non-interactive (agent / CI) contract:
     - --channel telegram → no extra flags (CLI prints a secure setup link for the BotFather token)
     - --channel email    → no extra flags
     - --channel sendblue → requires --sendblue-api-key, --sendblue-secret-key, --sendblue-from (E.164 agent/sender number), and --sendblue-test-phone (E.164 recipient phone); no secure setup page
+    - --channel whatsapp → no extra flags; works with --keyless. When Meta Embedded Signup is available the CLI prints a public tokenized signup URL (valid ~30 min, no dashboard login needed), polls until signup completes in the browser (~15 min budget), then waits for an inbound WhatsApp message. When unavailable (flag off / self-hosted without Meta Tech Provider credentials) a keyless run prompts dashboard sign-in and retries; if still unavailable the CLI opens the dashboard integrations tab and exits.
     - --channel skip     → no extra flags (agent only, no channel)
+    - --channel web-chat → no extra flags. Links Web Chat, prints dashboard Chat tab URL. Embed path writes env vars; scaffold path creates an example app. Use --web-chat-setup scaffold|embed|skip in --ci (auto-detect when omitted).
 
   Optional CI-only escape hatches (secrets injected via env — never paste in chat):
     - --slack-config-token "xoxe.xoxp-…"    → skip the setup page; pass token directly
@@ -138,13 +151,10 @@ Non-interactive (agent / CI) contract:
   Defaults (do not pass unless needed):
     - Dashboard OAuth: omit --secret-key and --keyless (creates the agent in the user's Development environment)
     - Demo runtime: omit --runtime (shared Claude runtime in keyless mode; authenticated environments need a demo integration)
-    - US region: omit --region (use --region eu for EU Novu Cloud)
+    - US region: omit --region (use --region eu for EU Novu Cloud, or --staging / --region staging)
 
   Not supported headlessly with --keyless:
-    - whatsapp and teams → omit --keyless to authenticate via the dashboard, then finish channel setup in the dashboard
-
-  Not supported headlessly in keyless mode:
-    - whatsapp and teams → use the Novu dashboard instead; do not pass --channel whatsapp or --channel teams with --keyless
+    - teams → do not pass --channel teams with --keyless; omit --keyless to authenticate via the dashboard (teams finishes in the dashboard)
 
   One run = one new agent + one channel. Re-running creates another agent.
 
@@ -177,6 +187,16 @@ Machine-readable stdout (plain text, no ANSI — watch these in --ci mode):
     NOVU_CONNECT_SENDBLUE_WEBHOOK_CALLBACK_URL=<url>   (only when webhook auto-registration fails)
     NOVU_CONNECT_SENDBLUE_WEBHOOK_SECRET=<secret>      (only when present)
 
+  WhatsApp (only when Meta Embedded Signup is available; otherwise the CLI opens the dashboard and exits):
+    NOVU_CONNECT_WHATSAPP_SIGNUP_URL=<url>            (deliver to the user; signup completes in the browser)
+    NOVU_CONNECT_WHATSAPP_WA_ME_URL=<url>             (only when present)
+    NOVU_CONNECT_WHATSAPP_WA_ME_QR_PNG=<absolute png path>   (only when present)
+    NOVU_CONNECT_WHATSAPP_PHONE_NUMBER=<number>       (only when present)
+
+  Web Chat:
+    NOVU_CONNECT_WEB_CHAT_DASHBOARD_URL=<url>
+    NOVU_CONNECT_WEB_CHAT_EMBED_PROMPT_FILE=<absolute path>   (only when an existing project needs UI wiring)
+
   Chat SDK (requirements summary):
     NOVU_CONNECT_CHAT_SDK_REQUIREMENTS_FILE=<absolute path to requirements summary file>
 
@@ -186,13 +206,21 @@ Machine-readable stdout (plain text, no ANSI — watch these in --ci mode):
   LangChain bridge (requirements summary):
     NOVU_CONNECT_LANGCHAIN_REQUIREMENTS_FILE=<absolute path to requirements summary file>
 
-  Success:
+  Success (channels other than Web Chat):
     ✓ Your agent is live.
+
+  Web Chat success (one outcome):
+    ✓ Web Chat connected
+    ✓ Web Chat app ready.
+    ✓ Agent app ready with Web Chat.
+    ✓ Web Chat linked — add it to your app.
 
 Behavior & exit codes:
 
   - For slack, email, telegram, and sendblue: the CLI blocks and polls for the handoff (up to ~5 min).
-  - Exit 0 on success (prints "✓ Your agent is live." with agent identifier and dashboard URL).
+  - For whatsapp (when embedded signup is available): the CLI polls signup completion for up to ~15 min, then the inbound test message for up to ~5 min. Re-running resumes where signup left off.
+  - For web-chat: no inbound poll. The CLI links the channel, prints the dashboard URL, then embeds, scaffolds, or skips local setup.
+  - Exit 0 on success after printing the channel-specific success output.
   - Non-zero exit on failure (prints "✗ ..." with an error message).
   - Safe to re-run on Slack OAuth timeout or "Failed to create Slack app" (the Slack app is reused).
 

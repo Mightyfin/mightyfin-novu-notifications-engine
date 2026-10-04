@@ -70,6 +70,20 @@ If you used the setup script, secure random secrets were generated automatically
   - To run in VPS: Your server's IP address (e.g., `http://<vps-ip-address>`) or domain name
 - `REDIS_CACHE_SERVICE_HOST` and `REDIS_HOST` can have same value for small deployments. For larger deployments, it is recommended to use separate Redis instances for caching and queue management.
 
+### Disable user sign-ups
+
+By default, anyone who can reach your dashboard can create a new account. To disable new account creation, set the following variable in your `.env` file on the API service:
+
+```bash
+DISABLE_USER_REGISTRATION=true
+```
+
+The default value is `false`. When set to `true`, the API rejects registration requests with a `400 Bad Request` and the message `Account creation is disabled`. Existing users can still sign in. Restart your services after changing the variable:
+
+```bash
+docker compose up -d
+```
+
 ## Configuration
 
 To keep the setup simple, we made some choices that may not be optimal for production:
@@ -600,6 +614,14 @@ The Dashboard container is served separately on its configured port (default **4
 
   <Accordion title="When is Local Tunnel Not Required?">
     If the customer's application and the self-hosted Novu deployment are within the same network, there is no need for a local tunnel. In this case, the application can communicate directly with Novu through the internal network. Checkout `Using bridge application url as bridge url` section to learn more.
+
+    Private or loopback bridge URLs (for example `http://10.x.x.x/...` or `http://127.0.0.1/...`) are blocked by outbound SSRF protection by default. Allow specific internal hosts or CIDRs with `NOVU_SAFE_OUTBOUND_ALLOW` on the API and Worker services:
+
+    ```bash
+    NOVU_SAFE_OUTBOUND_ALLOW=host.docker.internal,10.0.0.0/8,.svc.cluster.local
+    ```
+
+    Link-local and cloud metadata addresses (`169.254.0.0/16`, `fe80::/10`, `metadata.google.internal`) cannot be allow-listed.
   </Accordion>
 
   <Accordion title="When is Local Tunnel Required?">

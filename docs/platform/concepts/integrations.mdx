@@ -36,7 +36,7 @@ Refer to this resource to see the full list of [providerIds used in Novu](https:
 
 ## Environment-scoped behavior
 
-Each integration is scoped to a specific environment—such as development, staging, or production. This means you must configure separate integrations for each environment, even if they point to the same provider.
+Each integration is scoped to a specific environment - such as development, staging, or production. This means you must configure separate integrations for each environment, even if they point to the same provider.
 
 This separation ensures that test messages don’t accidentally go to production users, and different credentials or delivery settings can be safely isolated across environments.
 
@@ -45,6 +45,8 @@ This separation ensures that test messages don’t accidentally go to production
 Each environment can support multiple active integrations per channel, but only one can be marked as the primary integration for email and SMS channels. However, for push and chat channels, all active integrations are used in parallel to deliver messages. 
 
 The primary integration serves as the default route when a message is sent over that channel unless explicitly overridden. You can update which integration is marked as primary or deactivate an integration entirely.
+
+To choose among multiple active integrations from subscriber or [context](/platform/concepts/contexts) data, see [Integration conditions](/platform/integrations/integration-conditions).
 
 ## Integration credentials
 

@@ -1,4 +1,11 @@
-import type { AgentRuntime, AgentSubscriberAccessEnum, AgentVisibility, ManagedRuntimeConfigDto } from '@novu/shared';
+import type {
+  AgentAnalyticsSource,
+  AgentReplyPolicyEnum,
+  AgentRuntime,
+  AgentSubscriberAccessEnum,
+  AgentVisibility,
+  ManagedRuntimeConfigDto,
+} from '@novu/shared';
 import type { ChangePropsValueType } from '../../types/helpers';
 import type { EnvironmentId } from '../environment';
 import type { OrganizationId } from '../organization';
@@ -9,10 +16,14 @@ export interface AgentBehavior {
   /**
    * Whether the agent accepts inbound messages from senders not yet linked to a
    * subscriber, across all channels. `open` auto-provisions unknown senders;
-   * `restricted` rejects them. Unset resolves as restricted. Managed create
-   * defaults to open; self-hosted create defaults to restricted.
+   * `restricted` rejects them. Managed create defaults to open; self-hosted
+   * create defaults to restricted. Always persisted (backfilled for legacy rows).
    */
-  subscriberAccess?: AgentSubscriberAccessEnum;
+  subscriberAccess: AgentSubscriberAccessEnum;
+  /**
+   * Shared-room reply policy. Absent on legacy rows is treated as `auto_reply`.
+   */
+  replyPolicy?: AgentReplyPolicyEnum;
 }
 
 export interface ManagedRuntimeConfig {
@@ -37,7 +48,7 @@ export class AgentEntity {
 
   active: boolean;
 
-  behavior?: AgentBehavior;
+  behavior: AgentBehavior;
 
   bridgeUrl?: string;
 
@@ -65,6 +76,12 @@ export class AgentEntity {
    * (model, systemPrompt, MCP servers, tools) is fetched from the provider on demand.
    */
   managedRuntime?: ManagedRuntimeConfig;
+
+  /**
+   * Where the agent was created from (CLI, dashboard, API). Used for product
+   * behaviour such as the no-bridge onboarding reply; also powers analytics.
+   */
+  creationSource?: AgentAnalyticsSource;
 
   _environmentId: EnvironmentId;
 

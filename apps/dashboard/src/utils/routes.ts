@@ -9,6 +9,7 @@ export const ROUTES = {
   SSO_SIGN_IN: '/auth/sso',
   VERIFY_EMAIL: '/auth/verify-email',
   USECASE_SELECT: '/onboarding/usecase',
+  AGENTS_PERSONALIZE: '/onboarding/agents/personalize',
   AGENTS_SETUP: '/onboarding/agents/setup',
   INBOX_USECASE: '/onboarding/inbox',
   INBOX_EMBED: '/onboarding/inbox/embed',
@@ -37,6 +38,7 @@ export const ROUTES = {
   WELCOME: '/env/:environmentSlug/welcome',
   HOME: '/env/:environmentSlug/home',
   EDIT_WORKFLOW_PREFERENCES: 'preferences',
+  EDIT_WORKFLOW_AGENT: 'agent',
   EDIT_STEP: 'steps/:stepSlug',
 
   EDIT_STEP_TEMPLATE: 'steps/:stepSlug/editor',
@@ -88,12 +90,19 @@ export const ROUTES = {
   AGENT_DETAILS_INTEGRATIONS_DETAIL:
     '/env/:environmentSlug/agents/:agentIdentifier/integrations/:integrationIdentifier',
   AGENT_DETAILS_TAB: '/env/:environmentSlug/agents/:agentIdentifier/:agentTab',
+  /** Public, tokenized Embedded Signup page opened by `npx novu connect` (keyless or authenticated). */
+  AGENT_WHATSAPP_SIGNUP: '/agents/whatsapp/connect/:token',
   AGENT_TELEGRAM_MOBILE_SETUP: '/agents/telegram/connect/:token',
   AGENT_SLACK_SETUP: '/agents/slack/connect/:token',
   INTEGRATION_TELEGRAM_MOBILE_SETUP: '/integrations/telegram/connect/:token',
 } as const;
 
 export const AGENT_DETAILS_DEFAULT_TAB = 'overview';
+
+/** Legacy `/chat` tab. Redirects to overview with the preview drawer open. */
+export const AGENT_DETAILS_CHAT_TAB = 'chat';
+
+export const WEB_CHAT_PREVIEW_PARAM = 'previewChat';
 
 export const AGENT_DETAILS_TABS = ['overview', 'integrations'] as const;
 

@@ -324,6 +324,13 @@ export const sesConfig: IConfigCredential[] = [
     type: 'string',
     required: true,
   },
+  {
+    key: CredentialsKeyEnum.ConfigurationSetName,
+    displayName: 'Configuration Set Name',
+    description: 'The name of the SES Configuration Set to apply to sent emails',
+    type: 'string',
+    required: false,
+  },
   ...mailConfigBase,
 ];
 
@@ -490,6 +497,18 @@ export const twilioConfig: IConfigCredential[] = [
     displayName: 'Auth token',
     type: 'string',
     required: true,
+  },
+  {
+    key: CredentialsKeyEnum.Region,
+    displayName: 'Data residency region',
+    description: 'Select EU if your Twilio account uses EU data residency (IE1). Use region-specific credentials.',
+    type: 'dropdown',
+    required: false,
+    value: 'us',
+    dropdown: [
+      { name: 'US (default)', value: 'us' },
+      { name: 'EU (Ireland)', value: 'eu' },
+    ],
   },
   ...smsConfigBase,
 ];
@@ -896,7 +915,7 @@ export const brazeEmailConfig: IConfigCredential[] = [
   },
   {
     key: CredentialsKeyEnum.AppID,
-    displayName: 'Base URL',
+    displayName: 'App ID',
     type: 'string',
     required: true,
   },
@@ -1000,6 +1019,20 @@ export const emailWebhookConfig: IConfigCredential[] = [
     description: 'the secret used to sign webhooks calls',
     required: true,
   },
+  {
+    key: CredentialsKeyEnum.HmacSecretKeyEncoding,
+    displayName: 'Secret Hmac Key Encoding',
+    type: 'dropdown',
+    description:
+      'how the Secret Hmac Key is interpreted when signing webhook calls — Base-64/HEX for binary keys (e.g. AWS KMS)',
+    required: false,
+    value: 'text',
+    dropdown: [
+      { name: 'Text', value: 'text' },
+      { name: 'Base-64', value: 'base64' },
+      { name: 'HEX', value: 'hex' },
+    ],
+  },
   ...mailConfigBase,
 ];
 
@@ -1031,6 +1064,9 @@ export const novuInAppConfig: IConfigCredential[] = [
     },
   },
 ];
+
+/** Mirrors Inbox HMAC toggle — optional per-session agent authorization for Web Chat. */
+export const novuWebChatConfig: IConfigCredential[] = novuInAppConfig;
 
 export const sendchampConfig: IConfigCredential[] = [
   {
@@ -1358,6 +1394,31 @@ export const sendblueConfig: IConfigCredential[] = [
   },
 ];
 
+export const photonImessageConfig: IConfigCredential[] = [
+  {
+    key: CredentialsKeyEnum.ApiKey,
+    displayName: 'Project ID',
+    description: 'Your Photon project ID from app.photon.codes',
+    type: 'string',
+    required: true,
+  },
+  {
+    key: CredentialsKeyEnum.SecretKey,
+    displayName: 'Project Secret',
+    description: 'Your Photon project secret from app.photon.codes',
+    type: 'string',
+    required: true,
+  },
+  {
+    key: CredentialsKeyEnum.Token,
+    displayName: 'Webhook Signing Secret',
+    description:
+      'Issued by Photon when the inbound webhook is registered — filled in automatically by "Configure webhook", or paste it here after adding the webhook manually in the Photon dashboard',
+    type: 'string',
+    required: false,
+  },
+];
+
 export const lineConfig: IConfigCredential[] = [
   {
     key: CredentialsKeyEnum.ApiToken,
@@ -1508,6 +1569,24 @@ export const cmTelecomConfig: IConfigCredential[] = [
   ...smsConfigBase,
 ];
 
+export const ruachSmsConfig: IConfigCredential[] = [
+  {
+    key: CredentialsKeyEnum.ApiKey,
+    displayName: 'API Key',
+    description: 'Your Ruach SMS API key',
+    type: 'string',
+    required: true,
+  },
+  {
+    key: CredentialsKeyEnum.ClientId,
+    displayName: 'Client ID',
+    description: 'Your Ruach SMS client identifier',
+    type: 'string',
+    required: true,
+  },
+  ...smsConfigBase,
+];
+
 export const telegramConfig: IConfigCredential[] = [
   {
     key: CredentialsKeyEnum.ApiToken,
@@ -1601,6 +1680,89 @@ export const anthropicAwsAgentConfig: IConfigCredential[] = [
     displayName: 'Environment ID',
     description: 'The environment ID auto-provisioned for this integration. Read-only.',
     type: 'string',
+    required: false,
+  },
+];
+
+/**
+ * PagerDuty is routed per subscriber — the routing key and region live on the
+ * per-subscriber `ChannelConnection.auth`, provisioned via
+ * `POST /v1/channel-endpoints` with `type: pagerduty_service`. The env-level
+ * integration record is an anchor only (identifier + name); no fields are
+ * configured on the integration itself.
+ */
+export const pagerdutyConfig: IConfigCredential[] = [];
+
+/**
+ * Opsgenie is routed per subscriber: the API integration key and region live
+ * on the per-subscriber `ChannelConnection.auth`, provisioned via
+ * `POST /v1/channel-endpoints` with `type: opsgenie_integration`. The env-level
+ * integration record is an anchor only (identifier + name); no fields are
+ * configured on the integration itself.
+ */
+export const opsgenieConfig: IConfigCredential[] = [];
+
+/**
+ * Grafana is routed per subscriber: the IRM/OnCall incoming-webhook URL and
+ * optional bearer token live encrypted on the per-subscriber
+ * `ChannelEndpoint.endpoint`, provisioned via `POST /v1/channel-endpoints`
+ * with `type: grafana_oncall_integration`. The env-level integration record
+ * is an anchor only (identifier + name); no fields are configured on the
+ * integration itself.
+ */
+export const grafanaConfig: IConfigCredential[] = [];
+
+export const toolWebhookConfig: IConfigCredential[] = [
+  {
+    key: CredentialsKeyEnum.RoutingMode,
+    displayName: 'Routing Mode',
+    type: 'dropdown',
+    description: 'Static delivers to one integration URL; dynamic routes per subscriber endpoint',
+    required: false,
+    value: 'static',
+    dropdown: [
+      { name: 'Static', value: 'static' },
+      { name: 'Dynamic', value: 'dynamic' },
+    ],
+  },
+  {
+    key: CredentialsKeyEnum.Method,
+    displayName: 'HTTP Method',
+    type: 'dropdown',
+    required: true,
+    value: 'POST',
+    dropdown: [
+      { name: 'POST', value: 'POST' },
+      { name: 'PUT', value: 'PUT' },
+      { name: 'PATCH', value: 'PATCH' },
+    ],
+  },
+  {
+    key: CredentialsKeyEnum.WebhookUrl,
+    displayName: 'Endpoint URL',
+    type: 'string',
+    description: 'Webhook URL used in static routing mode',
+    required: false,
+  },
+  {
+    key: CredentialsKeyEnum.Headers,
+    displayName: 'Headers',
+    type: 'textarea',
+    description: 'Default request headers as a JSON key/value object string',
+    required: false,
+  },
+  {
+    key: CredentialsKeyEnum.Body,
+    displayName: 'Body',
+    type: 'textarea',
+    description: 'Default request body as a JSON key/value object string',
+    required: false,
+  },
+  {
+    key: CredentialsKeyEnum.SecretKey,
+    displayName: 'Signing Secret',
+    type: 'string',
+    description: 'Optional HMAC secret used to sign webhook calls (X-Novu-Signature)',
     required: false,
   },
 ];

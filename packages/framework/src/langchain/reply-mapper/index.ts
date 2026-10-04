@@ -4,6 +4,7 @@ import type { AgentRuntimeContext } from '../../resources/agent/agent.runtime';
 import type { ToolApprovalConfig } from '../../resources/agent/agent.types';
 import { isCardElement } from '../../resources/agent/guards';
 import { toLangChainMessages } from '../history-mapper';
+import { hydrateUnreachableAttachmentUrls } from '../history-mapper/hydrate-attachment-urls';
 import {
   createApprovalMiddleware,
   executeApprovedTools,
@@ -68,14 +69,19 @@ function finalText(messages: BaseMessage[]): string {
   return '';
 }
 
-async function deliverText(text: string, ctx: AgentRuntimeContext): Promise<void> {
+async function deliverText(
+  text: string,
+  ctx: AgentRuntimeContext,
+  formatReply?: LangChainAgentConfig['formatReply']
+): Promise<void> {
   if (!text) {
     await ctx.typing.stop();
 
     return;
   }
 
-  await ctx.reply(text);
+  const content = formatReply ? ((await formatReply(text)) ?? text) : text;
+  await ctx.reply(content);
 }
 
 // ─── Config path (Novu-managed approval loop) ───────────────────────────────────
@@ -86,7 +92,7 @@ async function runAgentConfig(
   approvalConfig: ToolApprovalConfig | undefined
 ): Promise<void> {
   const freshResults = await executeApprovedTools(config.tools, ctx);
-  const messages = toLangChainMessages(ctx.history, undefined, freshResults);
+  const messages = await hydrateUnreachableAttachmentUrls(toLangChainMessages(ctx, undefined, freshResults));
 
   const middleware: AgentMiddleware[] = [];
   if (config.needsApproval) {
@@ -105,7 +111,7 @@ async function runAgentConfig(
 
   let result: AgentInvokeResult;
   try {
-    result = (await agent.invoke({ messages })) as AgentInvokeResult;
+    result = (await agent.invoke({ messages }, config.invokeConfig)) as AgentInvokeResult;
   } catch (error) {
     const approval = findToolApprovalRequired(error);
     if (approval) {
@@ -118,7 +124,7 @@ async function runAgentConfig(
   }
 
   emitExecutedToolResults(result.messages, ctx, new Set(freshResults.keys()));
-  await deliverText(finalText(result.messages), ctx);
+  await deliverText(finalText(result.messages), ctx, config.formatReply);
 }
 
 // ─── Router ─────────────────────────────────────────────────────────────────────

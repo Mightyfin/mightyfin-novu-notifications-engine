@@ -1,5 +1,5 @@
 import type { ChannelEndpointType } from '@novu/shared';
-import { ChannelTypeEnum } from '@novu/shared';
+import { ChannelTypeEnum, FeatureFlagsKeysEnum } from '@novu/shared';
 import { formatDistanceToNow } from 'date-fns';
 import { useMemo, useState } from 'react';
 import { ExternalToast } from 'sonner';
@@ -14,6 +14,7 @@ import { useEnvironment } from '@/context/environment/hooks';
 import { useCreateChannelEndpoint } from '@/hooks/use-create-channel-endpoint';
 import { useDeleteChannelEndpoint } from '@/hooks/use-delete-channel-endpoint';
 import { useDeleteSubscriberCredentials } from '@/hooks/use-delete-subscriber-credentials';
+import { useFeatureFlag } from '@/hooks/use-feature-flag';
 import { useFetchChannelConnections } from '@/hooks/use-fetch-channel-connections';
 import { useFetchChannelEndpoints } from '@/hooks/use-fetch-channel-endpoints';
 import { useFetchIntegrations } from '@/hooks/use-fetch-integrations';
@@ -68,11 +69,13 @@ export function SubscriberCredentials({
   onEditInOverview,
 }: SubscriberCredentialsProps) {
   const { currentEnvironment } = useEnvironment();
+  const isToolChannelEnabled = useFeatureFlag(FeatureFlagsKeysEnum.IS_TOOL_CHANNEL_ENABLED);
   const { data: subscriber, isPending: isSubscriberPending } = useFetchSubscriber({ subscriberId });
   const { integrations, isPending: isIntegrationsPending } = useFetchIntegrations();
+  // When Tool is enabled, fetch all channels and partition client-side; otherwise keep the chat-only query.
   const { channelEndpoints, isPending: isEndpointsPending } = useFetchChannelEndpoints({
     subscriberId,
-    channel: ChannelTypeEnum.CHAT,
+    channel: isToolChannelEnabled ? undefined : ChannelTypeEnum.CHAT,
   });
   const { channelConnections, isPending: isConnectionsPending } = useFetchChannelConnections({
     channel: ChannelTypeEnum.CHAT,
@@ -100,13 +103,22 @@ export function SubscriberCredentials({
       return [];
     }
 
-    return buildCredentialGroups({
+    const built = buildCredentialGroups({
       subscriber,
       integrations: environmentIntegrations,
       channelEndpoints,
       channelConnections,
+      includeToolChannel: isToolChannelEnabled,
     });
-  }, [subscriber, environmentIntegrations, channelEndpoints, channelConnections]);
+
+    // Empty-only groups exist so editors can add credentials via the picker.
+    // Read-only has no picker — drop them so we don't render empty section stubs.
+    if (readOnly) {
+      return built.filter((group) => group.rows.length > 0);
+    }
+
+    return built;
+  }, [subscriber, environmentIntegrations, channelEndpoints, channelConnections, isToolChannelEnabled, readOnly]);
 
   if (isSubscriberPending || isIntegrationsPending || isEndpointsPending || isConnectionsPending) {
     return <CredentialsSkeleton />;
@@ -265,8 +277,8 @@ export function SubscriberCredentials({
   };
 
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex flex-1 flex-col gap-6 overflow-y-auto">
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto">
         {groups.length > 0 ? (
           <div className="flex flex-col gap-2">
             {groups.map((group) => (
@@ -283,14 +295,14 @@ export function SubscriberCredentials({
           <div className="flex flex-col items-center justify-center gap-1 py-10 text-center">
             <span className="text-label-sm text-text-strong">No credentials</span>
             <span className="text-label-xs text-text-soft">
-              Connect a push, chat, email or SMS integration to manage subscriber credentials.
+              {`Connect a push, chat, email or SMS${isToolChannelEnabled ? ', or tool' : ''} integration to manage subscriber credentials.`}
             </span>
           </div>
         )}
       </div>
 
-      <Separator />
-      <div className="flex flex-col gap-2.5 px-5 py-3">
+      <Separator className="shrink-0" />
+      <div className="flex shrink-0 flex-col gap-2.5 px-5 py-3">
         {subscriber?.updatedAt && (
           <span className="text-2xs text-text-soft">
             Last updated {formatDistanceToNow(new Date(subscriber.updatedAt), { addSuffix: true })}

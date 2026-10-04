@@ -2,7 +2,6 @@ import { Module } from '@nestjs/common';
 import {
   analyticsService,
   BulkCreateExecutionDetails,
-  CloudflareSchedulerService,
   ComputeJobWaitDurationService,
   CreateExecutionDetails,
   CreateNotificationJobs,
@@ -24,13 +23,16 @@ import {
   InboundMailRequestLogger,
   InMemoryLRUCacheService,
   InvalidateCacheService,
+  isBullMqEnabled,
   LoggerModule,
   MetricsModule,
+  NotificationPayloadService,
   ProcessTenant,
   QueuesModule,
   RequestLogRepository,
   SafeOutboundHttpService,
   StepRunRepository,
+  StepTemplateHydrationService,
   StorageHelperService,
   storageService,
   TraceLogRepository,
@@ -92,8 +94,13 @@ const dalService = {
   provide: DalService,
   useFactory: async () => {
     const service = new DalService();
+    const mongoUrl = process.env.MONGO_URL;
 
-    await service.connect(process.env.MONGO_URL!);
+    if (!mongoUrl) {
+      throw new Error('MONGO_URL is required to connect the worker to MongoDB');
+    }
+
+    await service.connect(mongoUrl);
 
     return service;
   },
@@ -120,7 +127,6 @@ const PROVIDERS = [
   analyticsService,
   BulkCreateExecutionDetails,
   cacheService,
-  CloudflareSchedulerService,
   ComputeJobWaitDurationService,
   CreateExecutionDetails,
   CreateNotificationJobs,
@@ -131,6 +137,8 @@ const PROVIDERS = [
   featureFlagsService,
   InMemoryLRUCacheService,
   InvalidateCacheService,
+  NotificationPayloadService,
+  StepTemplateHydrationService,
   StorageHelperService,
   storageService,
   UpdateSubscriber,
@@ -140,7 +148,12 @@ const PROVIDERS = [
   CreateTenant,
   ProcessTenant,
   ...DAL_MODELS,
-  ActiveJobsMetricService,
+  /*
+   * Queue-depth metrics are read off BullMQ counters, so the collector only
+   * exists while BullMQ does. QueuesModule drops the ACTIVE_JOBS_METRIC
+   * providers it depends on under the same condition.
+   */
+  ...(isBullMqEnabled() ? [ActiveJobsMetricService] : []),
   ExecuteBridgeRequest,
   ExecuteFrameworkRequest,
   ExecuteStepResolverRequest,

@@ -10,6 +10,7 @@ import { AgentEventEnum } from '../shared/enums/agent-event.enum';
 import { AgentPlatformEnum } from '../shared/enums/agent-platform.enum';
 import { parseToolApprovalActionId } from '../shared/tool-approval/action-id';
 import { ManagedAgentService } from './managed-agent.service';
+import { isMissingReadToolForSkillsError, MISSING_READ_TOOL_FOR_SKILLS_REPLY } from './managed-agent-errors';
 import { ConfirmToolApprovalCommand } from './tool-approval/confirm-tool-approval.command';
 import { ConfirmToolApproval } from './tool-approval/confirm-tool-approval.usecase';
 
@@ -33,8 +34,9 @@ export class ManagedRuntime implements AgentRuntime {
       return;
     }
 
-    // Managed agents otherwise only act on inbound messages (reactions are bridge-only today).
-    if (turn.event !== AgentEventEnum.ON_MESSAGE) {
+    // Managed agents act on new and edited inbound messages. Other lifecycle
+    // events (reactions, deletes) stay bridge-only today.
+    if (turn.event !== AgentEventEnum.ON_MESSAGE && turn.event !== AgentEventEnum.ON_MESSAGE_UPDATED) {
       return;
     }
 
@@ -61,6 +63,10 @@ export class ManagedRuntime implements AgentRuntime {
           conversation: turn.conversation,
           subscriber: turn.subscriber,
           userMessageText: turn.message?.text ?? '',
+          senderName: turn.message?.author.fullName,
+          storedAttachments: turn.storedAttachments,
+          workflowOrigin: turn.workflowOrigin,
+          unseenThreadMessages: turn.unseenThreadMessages,
           platformThreadId: turn.platformThreadId,
           platformMessageId: turn.message?.id,
         },
@@ -87,7 +93,24 @@ export class ManagedRuntime implements AgentRuntime {
       }
     } catch (err) {
       if (err instanceof DemoQuotaExhaustedError) {
-        await this.replyDemoQuotaExhausted(turn);
+        await this.replyOnThread(turn, DEMO_QUOTA_EXHAUSTED_REPLY);
+
+        return;
+      }
+
+      // Sync createSession / events.send failures never reach the async
+      // session.error webhook path — without this catch the ChatInstanceRegistry
+      // logs+swallows the error and Slack gets no agent reply.
+      if (isMissingReadToolForSkillsError(err)) {
+        this.logger.warn(
+          {
+            agentId: turn.agentId,
+            conversationId: turn.conversation._id,
+            err: err instanceof Error ? err.message : err,
+          },
+          'Managed dispatch rejected: skills require the read tool'
+        );
+        await this.replyOnThread(turn, MISSING_READ_TOOL_FOR_SKILLS_REPLY);
 
         return;
       }
@@ -102,9 +125,8 @@ export class ManagedRuntime implements AgentRuntime {
    * have no bridge onAction to forward to, and link buttons are handled in ingress).
    */
   private async handleAction(turn: ConversationTurn): Promise<void> {
-    const toolApproval = parseToolApprovalActionId(turn.action?.id);
-
-    if (!toolApproval) {
+    const parsed = parseToolApprovalActionId(turn.action?.id);
+    if (!parsed) {
       return;
     }
 
@@ -119,7 +141,7 @@ export class ManagedRuntime implements AgentRuntime {
         agentId: turn.agentId,
         subscriberId: turn.subscriber?.subscriberId ?? undefined,
         platform: turn.config.platform,
-        parsed: toolApproval,
+        parsed,
         sourceMessageId: turn.action?.sourceMessageId,
         platformThreadId: turn.platformThreadId,
         actionValue: turn.action?.value,
@@ -127,17 +149,17 @@ export class ManagedRuntime implements AgentRuntime {
     );
   }
 
-  private async replyDemoQuotaExhausted(turn: ConversationTurn): Promise<void> {
+  private async replyOnThread(turn: ConversationTurn, markdown: string): Promise<void> {
     applyPlatformThreadIdToThread(turn.thread, turn.platformThreadId);
     await this.outboundGateway.replyOnThread(
       turn.thread,
-      { markdown: DEMO_QUOTA_EXHAUSTED_REPLY },
+      { markdown },
       {
         persist: {
           conversationId: turn.conversation._id,
           channel: this.conversationService.getPrimaryChannel(turn.conversation),
           agentIdentifier: turn.config.agentIdentifier,
-          content: DEMO_QUOTA_EXHAUSTED_REPLY,
+          content: markdown,
           environmentId: turn.config.environmentId,
           organizationId: turn.config.organizationId,
         },

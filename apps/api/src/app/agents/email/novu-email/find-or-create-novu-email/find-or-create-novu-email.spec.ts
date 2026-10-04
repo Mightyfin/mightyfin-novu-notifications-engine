@@ -1,6 +1,12 @@
 import { ConflictException } from '@nestjs/common';
 import type { AgentEntity, IntegrationEntity } from '@novu/dal';
-import { ApiServiceLevelEnum, ChannelTypeEnum, EmailProviderIdEnum, NOVU_PROVIDERS } from '@novu/shared';
+import {
+  AgentSubscriberAccessEnum,
+  ApiServiceLevelEnum,
+  ChannelTypeEnum,
+  EmailProviderIdEnum,
+  NOVU_PROVIDERS,
+} from '@novu/shared';
 import { expect } from 'chai';
 import { restore, stub } from 'sinon';
 
@@ -16,7 +22,7 @@ function makeAgent(overrides: Partial<AgentEntity> = {}): AgentEntity {
     name: 'My Agent',
     identifier: 'my-agent',
     description: '',
-    behavior: undefined,
+    behavior: { subscriberAccess: AgentSubscriberAccessEnum.RESTRICTED },
     active: true,
     _environmentId: ENV_ID,
     _organizationId: ORG_ID,
@@ -218,34 +224,6 @@ describe('NovuEmailProvisioningService', () => {
       expect(agentRepo.update.called).to.equal(false);
     });
 
-    it('does not touch behavior.subscriberAccess when an existing NovuAgent link is returned', async () => {
-      const existingLink = {
-        _id: 'link-id',
-        _agentId: AGENT_ID,
-        _integrationId: 'existing-novu-agent-int-id',
-        _environmentId: ENV_ID,
-        _organizationId: ORG_ID,
-        connectedAt: null,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      agentIntegrationRepo.find.resolves([existingLink]);
-      integrationRepo.findOne.onFirstCall().resolves({
-        _id: 'existing-novu-agent-int-id',
-        providerId: EmailProviderIdEnum.NovuAgent,
-        channel: ChannelTypeEnum.EMAIL,
-        identifier: 'novu-email-existing',
-        name: 'Novu Email',
-        active: true,
-        credentials: { emailSlugPrefix: 'my-agent', inboxRoutingKey: 'abcd1234' },
-      });
-
-      const result = await buildUsecase().execute(AGENT_ID, ENV_ID, ORG_ID);
-
-      expect(result.provisionedNewLink).to.equal(false);
-      expect(agentRepo.update.called).to.equal(false);
-    });
-
     it('does not lookup or change outboundIntegrationId when an existing NovuAgent link is returned', async () => {
       const existingLink = {
         _id: 'link-id',
@@ -279,6 +257,7 @@ describe('NovuEmailProvisioningService', () => {
       expect(integrationRepo.create.called).to.equal(false);
       // Only the existing-link lookup happens; we never query for the default outbound integration.
       expect(integrationRepo.findOne.calledOnce).to.equal(true);
+      expect(agentRepo.update.called).to.equal(false);
     });
   });
 

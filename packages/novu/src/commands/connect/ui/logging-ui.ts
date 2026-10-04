@@ -22,6 +22,9 @@ import {
   logTelegramDeepLinkQrPngHandoffEvent,
   logTelegramSetupLinkHandoffEvent,
   logTelegramSetupLinkQrPngHandoffEvent,
+  logWhatsAppSignupHandoffEvent,
+  logWhatsAppTestHandoffEvents,
+  logWhatsAppWaMeQrPngHandoffEvent,
   writeAuthUrlHandoffFile,
 } from './handoff-events';
 import { printBridgeReconcilePlan } from './print-bridge-reconcile-plan';
@@ -217,8 +220,11 @@ export function createLoggingUI(): ConnectUI {
 
       return Promise.resolve('skip');
     },
-    confirmScaffold({ projectDir, appName, variant = 'chat-sdk' }) {
+    confirmScaffold({ projectDir, appName, variant = 'chat-sdk', llmAuthLabel }) {
       console.log(chalk.cyan(`→ Scaffolding ${bridgeScaffoldLabel(variant)} "${appName}" in ${projectDir}`));
+      if (llmAuthLabel) {
+        console.log(chalk.gray(`  LLM wiring: ${llmAuthLabel}`));
+      }
 
       return Promise.resolve(true);
     },
@@ -265,7 +271,6 @@ export function createLoggingUI(): ConnectUI {
     },
     pickChannel() {
       stop();
-      // Non-interactive default: Slack.
       console.log(chalk.gray('Non-interactive mode: defaulting to Slack.'));
 
       return Promise.resolve('slack');
@@ -391,6 +396,40 @@ export function createLoggingUI(): ConnectUI {
     sendblueConnected() {
       succeed('iMessage (Sendblue) connected');
     },
+    addingWhatsAppIntegration() {
+      start('Linking WhatsApp to your agent…');
+    },
+    awaitWhatsAppSignupOpen({ signupUrl }) {
+      stop();
+      console.log(`${chalk.cyan('→')} Finish WhatsApp signup here: ${chalk.underline(signupUrl)}`);
+      logWhatsAppSignupHandoffEvent({ signupUrl });
+
+      return Promise.resolve();
+    },
+    showWhatsAppSignupWaiting(_opts) {
+      start('Waiting for Meta Embedded Signup to complete…');
+    },
+    showWhatsAppTest({ waMeUrl, displayPhoneNumber }) {
+      stop();
+      if (displayPhoneNumber) {
+        console.log(`${chalk.cyan('→')} Send any WhatsApp message to ${chalk.bold(displayPhoneNumber)}.`);
+      } else {
+        console.log(`${chalk.cyan('→')} Send any WhatsApp message to your business number.`);
+      }
+      if (waMeUrl) {
+        console.log(`${chalk.cyan('→')} Open WhatsApp directly: ${chalk.underline(waMeUrl)}`);
+      }
+      logWhatsAppTestHandoffEvents({ waMeUrl, displayPhoneNumber });
+      if (waMeUrl) {
+        void renderQRPngFile(waMeUrl)
+          .then((waMeQrPngPath) => logWhatsAppWaMeQrPngHandoffEvent({ waMeQrPngPath }))
+          .catch(() => undefined);
+      }
+      start('Waiting for your first inbound WhatsApp message…');
+    },
+    whatsappConnected() {
+      succeed('WhatsApp connected');
+    },
     addingSlackIntegration() {
       start('Linking Slack to your agent…');
     },
@@ -432,8 +471,29 @@ export function createLoggingUI(): ConnectUI {
     slackSkipped() {
       console.log(chalk.gray('Slack step skipped (--skip-slack).'));
     },
+    addingWebChatIntegration() {
+      start('Linking Web Chat to your agent…');
+    },
+    awaitWebChatHandoff({ dashboardUrl, embedPrompt, embedPromptFile }) {
+      stop();
+      console.log(`${chalk.cyan('→')} Try Web Chat in the dashboard: ${chalk.underline(dashboardUrl)}`);
+      if (embedPromptFile) {
+        console.log(`${chalk.cyan('→')} Embed prompt saved to: ${chalk.bold(embedPromptFile)}`);
+      } else {
+        console.log(chalk.dim('Embed prompt ready for your app.'));
+      }
+      void embedPrompt;
+
+      return Promise.resolve();
+    },
+    pickWebChatSetup({ projectKind }) {
+      return Promise.resolve(projectKind === 'empty' ? 'scaffold' : 'embed');
+    },
+    scaffoldingWebChat() {
+      start('Scaffolding your Web Chat example app…');
+    },
     sendingWelcome() {
-      start('Asking your agent to say hello in Slack…');
+      start('Sending a welcome message from your agent…');
     },
     success(result) {
       stop();

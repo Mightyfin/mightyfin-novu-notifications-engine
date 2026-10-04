@@ -3,7 +3,11 @@ import type { ChannelEndpointType, IIntegration } from '@novu/shared';
 import { ChannelTypeEnum, ChatProviderIdEnum, providers } from '@novu/shared';
 import type { ChannelConnectionDto } from '@/api/channel-connections';
 import type { ChannelEndpointDto, ChannelEndpointPayload } from '@/api/channel-endpoints';
-import { type ChatEndpointTypeOption, getAddableEndpointTypes } from './chat-endpoint-types';
+import {
+  type ChatEndpointTypeOption,
+  getAddableEndpointTypes,
+  getAddableToolEndpointTypes,
+} from './chat-endpoint-types';
 
 export type EditableCredentialRow = {
   id: string;
@@ -75,10 +79,16 @@ export type ChatIntegrationRow = {
 
 export type CredentialRow = EditableCredentialRow | ReadonlyCredentialRow | ChatIntegrationRow;
 
+/** Integrations that can receive new credentials via the section Add picker. */
+export type AddableCredentialRow = EditableCredentialRow | ChatIntegrationRow;
+
 export type ChannelGroup = {
   channel: ChannelTypeEnum;
   label: string;
+  /** Integrations that already have credentials for this subscriber. */
   rows: CredentialRow[];
+  /** Addable integrations with no credentials yet — shown via the section Add picker. */
+  emptyRows: AddableCredentialRow[];
 };
 
 type StoredChannel = {
@@ -99,9 +109,10 @@ const CHANNEL_LABELS: Record<ChannelTypeEnum, string> = {
   [ChannelTypeEnum.SMS]: 'SMS',
   [ChannelTypeEnum.CHAT]: 'CHAT',
   [ChannelTypeEnum.PUSH]: 'PUSH',
+  [ChannelTypeEnum.TOOL]: 'TOOL',
 };
 
-/** Section order, following the Figma layout (email, sms, push, chat). */
+/** Section order, following the Figma layout (email, sms, push, chat). Tool is appended when enabled. */
 const GROUP_ORDER: ChannelTypeEnum[] = [
   ChannelTypeEnum.EMAIL,
   ChannelTypeEnum.SMS,
@@ -114,7 +125,11 @@ function getProviderDisplayName(providerId: string): string {
 }
 
 /** Chat providers that deliver to the subscriber's phone number rather than a webhook/channel endpoint. */
-const PHONE_BASED_CHAT_PROVIDERS = new Set<string>([ChatProviderIdEnum.WhatsAppBusiness, ChatProviderIdEnum.Sendblue]);
+const PHONE_BASED_CHAT_PROVIDERS = new Set<string>([
+  ChatProviderIdEnum.WhatsAppBusiness,
+  ChatProviderIdEnum.Sendblue,
+  ChatProviderIdEnum.PhotonImessage,
+]);
 
 function isPhoneBasedChatProvider(providerId: string): boolean {
   return PHONE_BASED_CHAT_PROVIDERS.has(providerId);
@@ -208,64 +223,71 @@ function buildReadonlyRows(
   }));
 }
 
-function buildChatGroup(
-  integrations: IIntegration[],
-  storedChannels: StoredChannel[],
-  channelEndpoints: ChannelEndpointDto[],
-  channelConnections: ChannelConnectionDto[],
-  phone: string
-): ChannelGroup {
-  const chatIntegrations = getActiveIntegrationsByChannel(integrations, ChannelTypeEnum.CHAT);
-  const chatEndpoints = channelEndpoints.filter(
-    (endpoint) => !endpoint.channel || endpoint.channel === ChannelTypeEnum.CHAT
-  );
+type EndpointIntegrationAddable = {
+  addableTypes: ChatEndpointTypeOption[];
+  connectionIdentifier?: string;
+};
 
-  const rows: CredentialRow[] = [];
+type CollectEndpointIntegrationRowsArgs = {
+  channel: ChannelTypeEnum;
+  idPrefix: string;
+  integrations: IIntegration[];
+  channelEndpoints: ChannelEndpointDto[];
+  getAddable: (integration: IIntegration) => EndpointIntegrationAddable;
+  prependItemsForIntegration?: (integration: IIntegration) => ChatCredentialItem[];
+  /** Skip integrations that have neither stored credentials nor addable types. */
+  skipEmptyNonAddable?: boolean;
+};
+
+/**
+ * Shared builder for endpoint-backed integration cards (chat + tool): one card per
+ * active integration, plus orphan endpoints whose integration is inactive/missing.
+ */
+function collectEndpointIntegrationRows({
+  channel,
+  idPrefix,
+  integrations,
+  channelEndpoints,
+  getAddable,
+  prependItemsForIntegration,
+  skipEmptyNonAddable = false,
+}: CollectEndpointIntegrationRowsArgs): {
+  integrationRows: ChatIntegrationRow[];
+  orphanRows: ChatIntegrationRow[];
+} {
+  const integrationRows: ChatIntegrationRow[] = [];
   const consumedEndpoints = new Set<string>();
 
-  for (const integration of chatIntegrations.filter(
-    (integration) => !isPhoneBasedChatProvider(integration.providerId)
-  )) {
-    const items: ChatCredentialItem[] = [];
-    const webhookItem = buildWebhookItem(integration, storedChannels);
+  for (const integration of integrations) {
+    const items: ChatCredentialItem[] = [...(prependItemsForIntegration?.(integration) ?? [])];
 
-    if (webhookItem) {
-      items.push(webhookItem);
-    }
-
-    for (const endpoint of chatEndpoints.filter(
+    for (const endpoint of channelEndpoints.filter(
       (endpoint) => endpoint.integrationIdentifier === integration.identifier
     )) {
       items.push(buildEndpointItem(endpoint, integration));
       consumedEndpoints.add(endpoint.identifier);
     }
 
-    const connection = channelConnections.find(
-      (candidate) => candidate.integrationIdentifier === integration.identifier
-    );
+    const { addableTypes, connectionIdentifier } = getAddable(integration);
 
-    rows.push({
-      id: `chat:${integration.providerId}:${integration.identifier}`,
+    if (skipEmptyNonAddable && items.length === 0 && addableTypes.length === 0) {
+      continue;
+    }
+
+    integrationRows.push({
+      id: `${idPrefix}:${integration.providerId}:${integration.identifier}`,
       kind: 'chatIntegration',
-      channel: ChannelTypeEnum.CHAT,
+      channel,
       providerId: integration.providerId,
       displayName: integration.name || getProviderDisplayName(integration.providerId),
       integrationIdentifier: integration.identifier,
       items,
-      addableTypes: getAddableEndpointTypes(integration.providerId, !!connection),
-      connectionIdentifier: connection?.identifier,
+      addableTypes,
+      connectionIdentifier,
     });
   }
 
-  const phoneBasedRows = buildReadonlyRows(
-    chatIntegrations.filter((integration) => isPhoneBasedChatProvider(integration.providerId)),
-    phone,
-    'phone'
-  );
-  rows.push(...phoneBasedRows);
-
-  // Endpoints whose integration is not an active chat integration still get their own card.
-  const orphanEndpoints = chatEndpoints.filter((endpoint) => !consumedEndpoints.has(endpoint.identifier));
+  const orphanEndpoints = channelEndpoints.filter((endpoint) => !consumedEndpoints.has(endpoint.identifier));
   const orphanGroups = new Map<string, ChannelEndpointDto[]>();
 
   for (const endpoint of orphanEndpoints) {
@@ -273,14 +295,16 @@ function buildChatGroup(
     orphanGroups.set(key, [...(orphanGroups.get(key) ?? []), endpoint]);
   }
 
+  const orphanRows: ChatIntegrationRow[] = [];
+
   for (const [key, endpoints] of orphanGroups) {
     const [first] = endpoints;
     const providerId = first.providerId ?? '';
 
-    rows.push({
-      id: `chat-orphan:${key}`,
+    orphanRows.push({
+      id: `${idPrefix}-orphan:${key}`,
       kind: 'chatIntegration',
-      channel: ChannelTypeEnum.CHAT,
+      channel,
       providerId,
       displayName: getProviderDisplayName(providerId),
       integrationIdentifier: first.integrationIdentifier ?? '',
@@ -289,11 +313,73 @@ function buildChatGroup(
     });
   }
 
-  return {
+  return { integrationRows, orphanRows };
+}
+
+function buildChatGroup(
+  integrations: IIntegration[],
+  storedChannels: StoredChannel[],
+  channelEndpoints: ChannelEndpointDto[],
+  channelConnections: ChannelConnectionDto[],
+  phone: string
+): ChannelGroup {
+  const chatIntegrations = getActiveIntegrationsByChannel(integrations, ChannelTypeEnum.CHAT);
+  // Null channel is legacy chat; exclude other channels when the list is unfiltered.
+  const chatEndpoints = channelEndpoints.filter(
+    (endpoint) => !endpoint.channel || endpoint.channel === ChannelTypeEnum.CHAT
+  );
+
+  const { integrationRows, orphanRows } = collectEndpointIntegrationRows({
     channel: ChannelTypeEnum.CHAT,
-    label: CHANNEL_LABELS[ChannelTypeEnum.CHAT],
-    rows,
-  };
+    idPrefix: 'chat',
+    integrations: chatIntegrations.filter((integration) => !isPhoneBasedChatProvider(integration.providerId)),
+    channelEndpoints: chatEndpoints,
+    prependItemsForIntegration: (integration) => {
+      const webhookItem = buildWebhookItem(integration, storedChannels);
+
+      return webhookItem ? [webhookItem] : [];
+    },
+    getAddable: (integration) => {
+      const connection = channelConnections.find(
+        (candidate) => candidate.integrationIdentifier === integration.identifier
+      );
+
+      return {
+        addableTypes: getAddableEndpointTypes(integration.providerId, !!connection),
+        connectionIdentifier: connection?.identifier,
+      };
+    },
+  });
+
+  const phoneBasedRows = buildReadonlyRows(
+    chatIntegrations.filter((integration) => isPhoneBasedChatProvider(integration.providerId)),
+    phone,
+    'phone'
+  );
+
+  return createChannelGroup(ChannelTypeEnum.CHAT, [...integrationRows, ...phoneBasedRows, ...orphanRows]);
+}
+
+/**
+ * TOOL section for endpoint-routed tools (PagerDuty, Opsgenie, and tool-webhook in dynamic
+ * routing mode). Integrations with no stored endpoints and nothing addable are omitted.
+ */
+function buildToolGroup(integrations: IIntegration[], channelEndpoints: ChannelEndpointDto[]): ChannelGroup {
+  const toolIntegrations = getActiveIntegrationsByChannel(integrations, ChannelTypeEnum.TOOL);
+  const toolEndpoints = channelEndpoints.filter((endpoint) => endpoint.channel === ChannelTypeEnum.TOOL);
+
+  const { integrationRows, orphanRows } = collectEndpointIntegrationRows({
+    channel: ChannelTypeEnum.TOOL,
+    idPrefix: 'tool',
+    integrations: toolIntegrations,
+    channelEndpoints: toolEndpoints,
+    getAddable: (integration) => ({
+      addableTypes: getAddableToolEndpointTypes(integration.providerId, integration.credentials),
+    }),
+    skipEmptyNonAddable: true,
+  });
+
+  return createChannelGroup(ChannelTypeEnum.TOOL, [...integrationRows, ...orphanRows]);
 }
 
 /**
@@ -329,27 +415,82 @@ type BuildCredentialGroupsArgs = {
   integrations: IIntegration[];
   channelEndpoints?: ChannelEndpointDto[];
   channelConnections?: ChannelConnectionDto[];
+  /** When true, appends the TOOL credentials section after chat. */
+  includeToolChannel?: boolean;
 };
+
+function hasCredentials(row: CredentialRow): boolean {
+  if (row.kind === 'editable') {
+    return row.values.length > 0;
+  }
+
+  if (row.kind === 'chatIntegration') {
+    return row.items.length > 0;
+  }
+
+  // Readonly rows (email/SMS/phone-based chat) always stay visible — they map to Overview.
+  return true;
+}
+
+function isAddableEmpty(row: CredentialRow): row is AddableCredentialRow {
+  if (row.kind === 'editable') {
+    return row.values.length === 0;
+  }
+
+  if (row.kind === 'chatIntegration') {
+    return row.items.length === 0 && row.addableTypes.length > 0;
+  }
+
+  return false;
+}
+
+/**
+ * Splits a group's rows into configured cards vs addable-but-empty integrations.
+ * Empty chat/tool rows with no addable types are dropped.
+ */
+function partitionGroup(group: ChannelGroup): ChannelGroup {
+  const rows: CredentialRow[] = [];
+  const emptyRows: AddableCredentialRow[] = [];
+
+  for (const row of group.rows) {
+    if (hasCredentials(row)) {
+      rows.push(row);
+    } else if (isAddableEmpty(row)) {
+      emptyRows.push(row);
+    }
+  }
+
+  return { ...group, rows, emptyRows };
+}
+
+function createChannelGroup(channel: ChannelTypeEnum, rows: CredentialRow[]): ChannelGroup {
+  return {
+    channel,
+    label: CHANNEL_LABELS[channel],
+    rows,
+    emptyRows: [],
+  };
+}
 
 export function buildCredentialGroups({
   subscriber,
   integrations,
   channelEndpoints = [],
   channelConnections = [],
+  includeToolChannel = false,
 }: BuildCredentialGroupsArgs): ChannelGroup[] {
-  const storedChannels = (subscriber.channels ?? []) as unknown as StoredChannel[];
+  const storedChannels: StoredChannel[] = subscriber.channels ?? [];
   const email = subscriber.email ?? '';
   const phone = subscriber.phone ?? '';
 
   const groups: ChannelGroup[] = GROUP_ORDER.map((channel) => {
     if (channel === ChannelTypeEnum.PUSH) {
-      return {
+      return createChannelGroup(
         channel,
-        label: CHANNEL_LABELS[channel],
-        rows: getActiveIntegrationsByChannel(integrations, ChannelTypeEnum.PUSH).map((integration) =>
+        getActiveIntegrationsByChannel(integrations, ChannelTypeEnum.PUSH).map((integration) =>
           buildEditableIntegrationRow(integration, storedChannels)
-        ),
-      };
+        )
+      );
     }
 
     if (channel === ChannelTypeEnum.CHAT) {
@@ -359,12 +500,12 @@ export function buildCredentialGroups({
     const value = channel === ChannelTypeEnum.EMAIL ? email : phone;
     const overviewField: OverviewField = channel === ChannelTypeEnum.EMAIL ? 'email' : 'phone';
 
-    return {
-      channel,
-      label: CHANNEL_LABELS[channel],
-      rows: buildSingleValueRows(integrations, channel, value, overviewField),
-    };
+    return createChannelGroup(channel, buildSingleValueRows(integrations, channel, value, overviewField));
   });
 
-  return groups.filter((group) => group.rows.length > 0);
+  if (includeToolChannel) {
+    groups.push(buildToolGroup(integrations, channelEndpoints));
+  }
+
+  return groups.map(partitionGroup).filter((group) => group.rows.length > 0 || group.emptyRows.length > 0);
 }
